@@ -1,6 +1,6 @@
 # Stepwise — AI Tutor MVP
 
-A responsive AI tutoring web app with a streaming chat interface, interactive tldraw whiteboard, voice input/output, and diagram rendering.
+A responsive AI tutoring web app with a streaming chat interface, interactive tldraw whiteboard, voice input/output, and diagram rendering. 
 
 ## Features
 
