@@ -1,0 +1,20 @@
+# AI Tutor Workspace Rules
+
+## Architecture & Framework Standards
+- Always use Next.js App Router conventions (React 19).
+- Maintain strict separation of concerns: Presentational UI belongs in Client Components (`'use client'`), data fetching and API handshakes belong in Server Components or API routes.
+- Organize features by a clean modular pattern: group components, hooks, and utilities by domains (e.g., `/components/whiteboard`, `/components/chat`, `/hooks/useVoiceTA.ts`).
+
+## TypeScript Specifications
+- Enforce 100% type safety. The use of `any` is strictly prohibited.
+- Explicitly define interfaces or types for all custom event states, canvas snapshot payloads, and API stream data packets.
+- Utilize strict null and undefined checking handles on all canvas DOM element references.
+
+## Code Generation Integrity
+- Never generate incomplete files or use placeholder summaries like `// TODO: Implement later`. Write out full, operational code chunks.
+- Write robust, semantic Tailwind CSS utility setups. Do not use inline styles or raw style properties.
+- Ensure every interactive element utilizes responsive, touch-friendly touch targets matching tablet display layout parameters (minimum 44x44px for buttons).
+
+## Security & Isolation
+- Do not hardcode API routes, credentials, or staging domain endpoints. Use `process.env` references exclusively.
+- Wrap sensory client mechanisms (Web Speech recognition, Canvas context initialization) inside isolated React Error Boundaries to prevent unexpected runtime crashes from impacting core application state.
