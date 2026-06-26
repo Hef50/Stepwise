@@ -28,21 +28,29 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const voice = useVoiceTA();
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
 
-  // Restore persisted messages on mount, converted to UIMessage shape
-  const restoredMessages = loadMessages();
-  const initialMessages: UIMessage[] = restoredMessages.map((m) => ({
-    id: m.id,
-    role: m.role,
-    parts: [{ type: "text" as const, text: m.content }],
-    metadata: undefined,
-  }));
-
-  const { messages, sendMessage, status } = useChat({
+  // Always start with empty messages so server and client render the same
+  // initial HTML. Persisted messages are restored client-side in useEffect.
+  const { messages, sendMessage, setMessages, status, stop } = useChat({
     transport: new DefaultChatTransport({ api: "/api/chat" }),
-    messages: initialMessages,
+    messages: [],
   });
 
   const isLoading = status === "streaming" || status === "submitted";
+
+  // Restore persisted messages after hydration (client-only)
+  useEffect(() => {
+    const persisted = loadMessages();
+    if (persisted.length > 0) {
+      const uiMessages: UIMessage[] = persisted.map((m) => ({
+        id: m.id,
+        role: m.role,
+        parts: [{ type: "text" as const, text: m.content }],
+        metadata: undefined,
+      }));
+      setMessages(uiMessages);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally run once on mount only
 
   // Persist whenever messages change
   useEffect(() => {
@@ -101,6 +109,13 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
     }
   }, [captureWhiteboard, sendMessage]);
 
+  const handleDeleteMessage = useCallback(
+    (id: string) => {
+      setMessages((prev) => prev.filter((m) => m.id !== id));
+    },
+    [setMessages]
+  );
+
   const handleClear = useCallback(() => {
     clearSession();
     window.location.reload();
@@ -144,13 +159,18 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
         <Separator />
 
         {/* Messages */}
-        <ChatMessages messages={messages} isLoading={isLoading} />
+        <ChatMessages
+          messages={messages}
+          isLoading={isLoading}
+          onDeleteMessage={handleDeleteMessage}
+        />
 
         {/* Input */}
         <ChatInput
           value={input}
           onChange={setInput}
           onSubmit={handleSubmit}
+          onStop={stop}
           isLoading={isLoading}
           voice={voice}
           files={files}

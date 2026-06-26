@@ -1,5 +1,4 @@
-import { generateText } from "ai";
-import { geminiVisionModel } from "@/lib/ai/gemini";
+import { openrouterClient, VISION_MODEL } from "@/lib/ai/gemini";
 import type { VisionRequest, VisionResponse } from "@/lib/types";
 
 export async function POST(request: Request): Promise<Response> {
@@ -13,35 +12,45 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  const imageContent = images.map((dataUrl) => {
-    const [header, base64Data] = dataUrl.split(",");
-    const mimeTypeMatch = header.match(/data:([^;]+)/);
-    const mimeType = mimeTypeMatch ? mimeTypeMatch[1] : "image/png";
-
-    return {
-      type: "image" as const,
-      image: base64Data,
-      mimeType,
-    };
+  const stream = await openrouterClient.chat.send({
+    chatRequest: {
+      model: VISION_MODEL,
+      stream: true,
+      messages: [
+        {
+          role: "user",
+          content: [
+            ...images.map((dataUrl) => ({
+              type: "image_url" as const,
+              imageUrl: { url: dataUrl },
+            })),
+            {
+              type: "text" as const,
+              text:
+                prompt ??
+                "Analyze what is shown in this image and describe it clearly for educational context.",
+            },
+          ],
+        },
+      ],
+      maxCompletionTokens: 2048,
+    },
+    httpReferer: "https://stepwise.app",
+    appTitle: "Stepwise AI Tutor",
   });
 
-  const { text } = await generateText({
-    model: geminiVisionModel,
-    messages: [
-      {
-        role: "user",
-        content: [
-          ...imageContent,
-          {
-            type: "text",
-            text: prompt || "Analyze what is shown in this image and describe it clearly for educational context.",
-          },
-        ],
-      },
-    ],
-    maxOutputTokens: 2048,
-  });
+  let analysis = "";
+  for await (const chunk of stream) {
+    const content = chunk.choices[0]?.delta.content;
+    if (content) analysis += content;
+  }
 
-  const response: VisionResponse = { analysis: text };
-  return Response.json(response);
+  if (!analysis) {
+    return Response.json(
+      { error: "Vision model returned an empty response" },
+      { status: 502 }
+    );
+  }
+
+  return Response.json({ analysis } satisfies VisionResponse);
 }

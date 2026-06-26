@@ -1,15 +1,17 @@
 "use client";
 
 import type { UIMessage } from "ai";
-import { Bot, User } from "lucide-react";
+import { Bot, User, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { MessageRenderer } from "@/components/diagrams/MessageRenderer";
+import { Button } from "@/components/ui/button";
 
 interface MessageBubbleProps {
   message: UIMessage;
+  onDelete: (id: string) => void;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({ message, onDelete }: MessageBubbleProps) {
   const isUser = message.role === "user";
 
   const textContent = message.parts
@@ -20,7 +22,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   return (
     <div
       className={cn(
-        "flex gap-3 px-1",
+        "group relative flex gap-3 px-1",
         isUser ? "flex-row-reverse" : "flex-row"
       )}
     >
@@ -40,20 +42,34 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         )}
       </div>
 
-      {/* Bubble */}
-      <div
-        className={cn(
-          "max-w-[80%] rounded-2xl px-4 py-3 text-sm shadow-sm",
-          isUser
-            ? "rounded-tr-sm bg-primary text-primary-foreground"
-            : "rounded-tl-sm bg-secondary text-secondary-foreground"
-        )}
-      >
-        {isUser ? (
-          <p className="whitespace-pre-wrap leading-relaxed">{textContent}</p>
-        ) : (
-          <MessageRenderer content={textContent} />
-        )}
+      {/* Bubble + delete button */}
+      <div className={cn("flex items-start gap-1", isUser ? "flex-row-reverse" : "flex-row")}>
+        <div
+          className={cn(
+            "max-w-[80%] rounded-2xl px-4 py-3 text-sm shadow-sm",
+            isUser
+              ? "rounded-tr-sm bg-primary text-primary-foreground"
+              : "rounded-tl-sm bg-secondary text-secondary-foreground"
+          )}
+        >
+          {isUser ? (
+            <p className="whitespace-pre-wrap leading-relaxed">{textContent}</p>
+          ) : (
+            <MessageRenderer content={textContent} />
+          )}
+        </div>
+
+        {/* Delete button — revealed on hover */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={() => onDelete(message.id)}
+          aria-label="Delete message"
+          className="h-6 w-6 flex-shrink-0 self-center opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+        >
+          <X className="h-3 w-3" />
+        </Button>
       </div>
     </div>
   );

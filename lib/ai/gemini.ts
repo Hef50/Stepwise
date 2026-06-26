@@ -1,12 +1,12 @@
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { OpenRouter } from "@openrouter/sdk";
 
-if (!process.env.GEMINI_API_KEY) {
-  throw new Error("GEMINI_API_KEY environment variable is not set.");
+if (!process.env.OPENROUTER_API_KEY) {
+  throw new Error("OPENROUTER_API_KEY environment variable is not set.");
 }
 
-export const googleAI = createGoogleGenerativeAI({
-  apiKey: process.env.GEMINI_API_KEY,
+export const openrouterClient = new OpenRouter({
+  apiKey: process.env.OPENROUTER_API_KEY,
 });
 
-/** Gemini Flash vision model for whiteboard/image analysis */
-export const geminiVisionModel = googleAI("gemini-2.0-flash");
+/** Free multimodal Gemma 4 model for vision analysis via OpenRouter */
+export const VISION_MODEL = "google/gemma-4-26b-a4b-it:free";

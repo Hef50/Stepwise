@@ -11,4 +11,4 @@ export const llm7 = createOpenAICompatible({
 });
 
 /** Default model for general tutoring conversations */
-export const llm7TextModel = llm7("deepseek-v3-0324");
+export const llm7TextModel = llm7("fast");

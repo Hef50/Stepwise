@@ -1,15 +1,45 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import type { Editor } from "@tldraw/tldraw";
 import { MessageSquare, PenTool } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { WhiteboardPanel } from "@/components/whiteboard/WhiteboardPanel";
-import { ChatPanel } from "@/components/chat/ChatPanel";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useWhiteboardCapture } from "@/hooks/useWhiteboardCapture";
+
+// ChatPanel reads from localStorage and uses browser-only APIs (Web Speech).
+// Rendering it on the server would always produce a different DOM than the
+// client, causing hydration mismatches. ssr:false renders it only in the browser.
+const ChatPanel = dynamic(
+  () => import("@/components/chat/ChatPanel").then((m) => m.ChatPanel),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-full flex-col gap-3 p-4">
+        <Skeleton className="h-8 w-32" />
+        <Skeleton className="h-4 w-full" />
+        <Skeleton className="h-4 w-3/4" />
+        <div className="flex-1" />
+        <Skeleton className="h-12 w-full" />
+      </div>
+    ),
+  }
+);
+
+const MIN_CHAT_WIDTH = 280;
+const MAX_CHAT_WIDTH = 720;
+const DEFAULT_CHAT_WIDTH = 420;
 
 export function AppShell() {
   const { editorRef, capture } = useWhiteboardCapture();
+  const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH);
+
+  // Refs so drag handlers never re-bind to stale closures
+  const isDraggingRef = useRef(false);
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(0);
 
   const handleEditorReady = useCallback(
     (editor: Editor) => {
@@ -18,17 +48,74 @@ export function AppShell() {
     [editorRef]
   );
 
+  const handleDividerMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      isDraggingRef.current = true;
+      startXRef.current = e.clientX;
+      startWidthRef.current = chatWidth;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    },
+    [chatWidth]
+  );
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      const delta = e.clientX - startXRef.current;
+      const next = Math.min(
+        Math.max(startWidthRef.current + delta, MIN_CHAT_WIDTH),
+        MAX_CHAT_WIDTH
+      );
+      setChatWidth(next);
+    };
+
+    const onMouseUp = () => {
+      if (!isDraggingRef.current) return;
+      isDraggingRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
+
   return (
     <>
-      {/* ── Large screens: side-by-side split ── */}
+      {/* ── Large screens: resizable side-by-side split ── */}
       <div className="hidden lg:flex h-screen w-full overflow-hidden">
-        {/* Chat panel — fixed width left column */}
-        <div className="flex w-[420px] min-w-[360px] flex-shrink-0 flex-col border-r border-border bg-background">
+        {/* Chat panel — draggable width */}
+        <div
+          className="flex flex-shrink-0 flex-col border-r border-border bg-background overflow-hidden"
+          style={{ width: chatWidth }}
+        >
           <ChatPanel captureWhiteboard={capture} />
         </div>
 
-        {/* Resizer hint */}
-        <div className="w-0.5 bg-border flex-shrink-0" />
+        {/* Drag handle */}
+        <div
+          onMouseDown={handleDividerMouseDown}
+          className="group relative w-1 flex-shrink-0 cursor-col-resize bg-border hover:bg-primary/40 active:bg-primary transition-colors"
+          title="Drag to resize"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize chat panel"
+        >
+          {/* Visual grip dots */}
+          <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 flex flex-col items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+            <span className="h-1 w-1 rounded-full bg-primary/60" />
+            <span className="h-1 w-1 rounded-full bg-primary/60" />
+            <span className="h-1 w-1 rounded-full bg-primary/60" />
+            <span className="h-1 w-1 rounded-full bg-primary/60" />
+            <span className="h-1 w-1 rounded-full bg-primary/60" />
+          </div>
+        </div>
 
         {/* Whiteboard — fills remaining space */}
         <div className="relative flex-1 overflow-hidden">

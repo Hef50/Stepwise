@@ -10,9 +10,10 @@ import { Bot } from "lucide-react";
 interface ChatMessagesProps {
   messages: UIMessage[];
   isLoading: boolean;
+  onDeleteMessage: (id: string) => void;
 }
 
-export function ChatMessages({ messages, isLoading }: ChatMessagesProps) {
+export function ChatMessages({ messages, isLoading, onDeleteMessage }: ChatMessagesProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -40,7 +41,11 @@ export function ChatMessages({ messages, isLoading }: ChatMessagesProps) {
     <ScrollArea className="flex-1 px-3">
       <div className="space-y-4 py-4">
         {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} />
+          <MessageBubble
+            key={message.id}
+            message={message}
+            onDelete={onDeleteMessage}
+          />
         ))}
 
         {isLoading && (
