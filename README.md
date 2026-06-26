@@ -13,7 +13,7 @@ A responsive AI tutoring web app with a streaming chat interface, interactive tl
 - **File upload** — attach images and PDFs to the AI context
 - **LocalStorage persistence** — chat history survives page refresh
 
-## Quick Start 
+## Quick Start  
 
 ```bash
 # 1. Clone and install
