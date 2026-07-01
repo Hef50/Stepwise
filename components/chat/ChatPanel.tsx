@@ -3,7 +3,9 @@
 import { useState, useCallback, useEffect, type FormEvent } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { Trash2 } from "lucide-react";
+import { Trash2, Settings } from "lucide-react";
+import { Dialog, DialogTrigger } from "@/components/ui/dialog";
+import SettingsPanel from "@/components/common/SettingsPanel";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -140,20 +142,37 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
             <h1 className="text-sm font-semibold">Stepwise</h1>
             <p className="text-xs text-muted-foreground">AI Tutor</p>
           </div>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={handleClear}
-                aria-label="Clear chat history"
-              >
-                <Trash2 className="h-4 w-4 text-muted-foreground" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Clear chat history</TooltipContent>
-          </Tooltip>
+          <div className="flex items-center gap-2">
+            <Dialog>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <DialogTrigger asChild>
+                    <Button type="button" variant="ghost" size="icon" aria-label="Settings">
+                      <Settings className="h-4 w-4 text-muted-foreground" />
+                    </Button>
+                  </DialogTrigger>
+                </TooltipTrigger>
+                <TooltipContent>Settings</TooltipContent>
+              </Tooltip>
+
+              <SettingsPanel onClose={() => { /* dialog close handled internally by Dialog */ }} />
+            </Dialog>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleClear}
+                  aria-label="Clear chat history"
+                >
+                  <Trash2 className="h-4 w-4 text-muted-foreground" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Clear chat history</TooltipContent>
+            </Tooltip>
+          </div>
         </div>
 
         <Separator />

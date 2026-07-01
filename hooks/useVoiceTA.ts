@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { loadSettings } from "@/lib/settings";
 import type { VoiceControls, VoiceState } from "@/lib/types";
 
 /**
@@ -192,6 +193,12 @@ export function useVoiceTA(): VoiceControls {
       return;
     }
 
+    const settings = loadSettings();
+    if (!settings.ttsEnabled) {
+      // Respect user setting — simply no-op if TTS disabled
+      return;
+    }
+
     // Stop recognition and any in-progress speech
     if (recognitionRef.current) {
       recognitionRef.current.onend = null;
@@ -202,7 +209,7 @@ export function useVoiceTA(): VoiceControls {
 
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
-    utterance.rate = 1.0;
+    utterance.rate = Math.max(0.5, Math.min(2.0, settings.talkingSpeed ?? 1));
     utterance.pitch = 1.0;
     utterance.volume = 1.0;
 
