@@ -1,4 +1,4 @@
-import { openrouterClient, VISION_MODEL } from "@/lib/ai/gemini";
+import { getOpenRouterClient, VISION_MODEL } from "@/lib/ai/gemini";
 import type { VisionRequest, VisionResponse } from "@/lib/types";
 
 export async function POST(request: Request): Promise<Response> {
@@ -12,6 +12,17 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
+  if (!process.env.OPENROUTER_API_KEY) {
+    return Response.json(
+      {
+        analysis:
+          "Vision analysis is unavailable right now because no OpenRouter API key is configured. Add an API key to enable image understanding.",
+      } satisfies VisionResponse,
+      { status: 200 }
+    );
+  }
+
+  const openrouterClient = getOpenRouterClient();
   const stream = await openrouterClient.chat.send({
     chatRequest: {
       model: VISION_MODEL,

@@ -2,12 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { LocalStorageChatStore } from "@/lib/persistence/chatStore";
 import { loadSettings, saveSettings, resetSettings, DEFAULT_SETTINGS } from "@/lib/settings";
 
-export function SettingsPanel({ onClose }: { onClose?: () => void }) {
+export function SettingsPanel({ onClose, renderAsDialog = true }: { onClose?: () => void; renderAsDialog?: boolean }) {
   const [talkingSpeed, setTalkingSpeed] = useState<number>(1);
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(true);
   const [autosave, setAutosave] = useState<boolean>(true);
@@ -44,6 +43,7 @@ export function SettingsPanel({ onClose }: { onClose?: () => void }) {
     const a = document.createElement("a");
     a.href = url;
     a.download = `stepwise_archives_${new Date().toISOString()}.json`;
+
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -79,14 +79,37 @@ export function SettingsPanel({ onClose }: { onClose?: () => void }) {
     const store = new LocalStorageChatStore();
     const sessions = store.listSessions();
     sessions.forEach((id) => store.clear(id));
-    alert("Cleared all chat sessions");
+    window.dispatchEvent(new CustomEvent("stepwise:clear-voice-data"));
+    alert("Cleared all chat sessions and voice transcripts");
   }, []);
 
-  return (
-    <DialogContent>
-      <DialogHeader>
-        <DialogTitle>Settings</DialogTitle>
-      </DialogHeader>
+  const header = renderAsDialog ? (
+    <DialogHeader>
+      <DialogTitle>Settings</DialogTitle>
+    </DialogHeader>
+  ) : (
+    <div className="mb-4">
+      <h2 className="text-lg font-semibold">Settings</h2>
+    </div>
+  );
+
+  const footer = (
+    <DialogFooter className="mt-4">
+      <div className="flex gap-2 w-full justify-between">
+        <div>
+          <Button variant="ghost" onClick={handleReset}>Reset defaults</Button>
+        </div>
+        <div className="flex gap-2">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button onClick={handleSave}>Save</Button>
+        </div>
+      </div>
+    </DialogFooter>
+  );
+
+  const body = (
+    <>
+      {header}
 
       <div className="space-y-4">
         <div>
@@ -137,19 +160,15 @@ export function SettingsPanel({ onClose }: { onClose?: () => void }) {
         </div>
       </div>
 
-      <DialogFooter className="mt-4">
-        <div className="flex gap-2 w-full justify-between">
-          <div>
-            <Button variant="ghost" onClick={handleReset}>Reset defaults</Button>
-          </div>
-          <div className="flex gap-2">
-            <Button onClick={onClose}>Cancel</Button>
-            <Button onClick={handleSave}>Save</Button>
-          </div>
-        </div>
-      </DialogFooter>
-    </DialogContent>
+      {footer}
+    </>
   );
+
+  if (renderAsDialog) {
+    return <DialogContent>{body}</DialogContent>;
+  }
+
+  return <div className="p-6 bg-background rounded">{body}</div>;
 }
 
 export default SettingsPanel;

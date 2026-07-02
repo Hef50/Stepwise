@@ -24,6 +24,9 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
       try {
         const mermaid = (await import("mermaid")).default;
 
+        // Basic sanitization: remove accidental fence markers
+        const sanitized = code.replace(/^```\s*mermaid\s*/i, "").replace(/```\s*$/i, "").trim();
+
         mermaid.initialize({
           startOnLoad: false,
           theme: "default",
@@ -31,11 +34,24 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
           fontFamily: "inherit",
         });
 
-        const { svg } = await mermaid.render(containerId, code);
+        // Suppress noisy console output from mermaid while we attempt to parse/render
+        const originalConsoleError = console.error;
+        try {
+          console.error = () => {};
 
-        if (!cancelled && containerRef.current) {
-          containerRef.current.innerHTML = svg;
-          setStatus("success");
+          // Try a parse step first to get cleaner syntax errors when available
+          if (typeof mermaid.parse === "function") {
+            mermaid.parse(sanitized);
+          }
+
+          const { svg } = await mermaid.render(containerId, sanitized);
+
+          if (!cancelled && containerRef.current) {
+            containerRef.current.innerHTML = svg;
+            setStatus("success");
+          }
+        } finally {
+          console.error = originalConsoleError;
         }
       } catch (err) {
         if (!cancelled) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { Mic, MicOff, Volume2, VolumeX } from "lucide-react";
+import { Headphones, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -17,7 +17,15 @@ interface VoiceControlsProps {
 }
 
 function VoiceControlsInner({ voice, lastAssistantMessage }: VoiceControlsProps) {
-  const { state, startListening, stopListening, speak, cancelSpeech } = voice;
+  const {
+    state,
+    startListening,
+    stopListening,
+    speak,
+    cancelSpeech,
+    toggleNativeVoiceMode,
+    setVoiceSpeed,
+  } = voice;
 
   if (!state.supported) {
     return (
@@ -43,7 +51,6 @@ function VoiceControlsInner({ voice, lastAssistantMessage }: VoiceControlsProps)
 
   return (
     <div className="flex items-center gap-1">
-      {/* Microphone toggle */}
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
@@ -70,7 +77,27 @@ function VoiceControlsInner({ voice, lastAssistantMessage }: VoiceControlsProps)
         </TooltipContent>
       </Tooltip>
 
-      {/* TTS toggle */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={toggleNativeVoiceMode}
+            aria-label="Toggle native voice mode"
+            className={cn(
+              state.nativeVoiceModeEnabled &&
+                "bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400"
+            )}
+          >
+            <Headphones className="h-5 w-5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>
+          {state.nativeVoiceModeEnabled ? "Native voice mode on" : "Native voice mode off"}
+        </TooltipContent>
+      </Tooltip>
+
       {lastAssistantMessage && (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -78,11 +105,7 @@ function VoiceControlsInner({ voice, lastAssistantMessage }: VoiceControlsProps)
               type="button"
               variant="ghost"
               size="icon"
-              onClick={
-                isSpeaking
-                  ? cancelSpeech
-                  : () => speak(lastAssistantMessage)
-              }
+              onClick={isSpeaking ? cancelSpeech : () => speak(lastAssistantMessage)}
               aria-label={isSpeaking ? "Stop speaking" : "Read response aloud"}
               className={cn(
                 "transition-colors",
@@ -102,6 +125,18 @@ function VoiceControlsInner({ voice, lastAssistantMessage }: VoiceControlsProps)
           </TooltipContent>
         </Tooltip>
       )}
+
+      <select
+        aria-label="Voice speed"
+        value={state.voiceSpeed.toFixed(2)}
+        onChange={(e) => setVoiceSpeed(Number(e.target.value))}
+        className="h-9 rounded-md border border-border bg-background px-2 text-xs"
+      >
+        <option value="0.75">0.75x</option>
+        <option value="1">1.00x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.50x</option>
+      </select>
     </div>
   );
 }

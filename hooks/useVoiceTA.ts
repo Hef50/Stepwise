@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { loadSettings } from "@/lib/settings";
-import type { VoiceControls, VoiceState } from "@/lib/types";
+import { loadSettings, saveSettings } from "@/lib/settings";
+import type { VoiceControls, VoiceState, VoiceTranscriptEntry } from "@/lib/types";
 
 /**
  * useVoiceTA — Provider-agnostic voice hook.
@@ -11,16 +11,25 @@ import type { VoiceControls, VoiceState } from "@/lib/types";
  * The public interface (VoiceControls) is deliberately abstract so this
  * implementation can be replaced with OpenAI Whisper/TTS without touching any
  * component that consumes it.
- *
- * Swap point:
- *   1. Create a new hook file (e.g. useVoiceOpenAI.ts) that returns VoiceControls.
- *   2. Replace the import in ChatPanel.tsx from useVoiceTA -> useVoiceOpenAI.
- *   3. No other changes required.
  */
 
 const isBrowser = typeof window !== "undefined";
 
-type SpeechRecognitionConstructor = new () => SpeechRecognition;
+type SpeechRecognitionLike = {
+  abort: () => void;
+  stop: () => void;
+  start: () => void;
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  continuous: boolean;
+  onstart: ((event?: Event) => void) | null;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onend: ((event?: Event) => void) | null;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
 function getSpeechRecognitionClass(): SpeechRecognitionConstructor | undefined {
   if (!isBrowser) return undefined;
@@ -35,38 +44,118 @@ function isSpeechSynthesisSupported(): boolean {
   return isBrowser && "speechSynthesis" in window;
 }
 
-export function useVoiceTA(): VoiceControls {
-  // Always start with supported: false so server and client render the same
-  // initial HTML. The real capability check runs in useEffect (client-only).
-  const [state, setState] = useState<VoiceState>({
-    mode: "idle",
-    transcript: "",
-    error: null,
-    supported: false,
+function createTranscriptEntry(
+  role: VoiceTranscriptEntry["role"],
+  text: string
+): VoiceTranscriptEntry {
+  return {
+    id: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    role,
+    text,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): VoiceControls {
+  const [state, setState] = useState<VoiceState>(() => {
+    const settings = isBrowser ? loadSettings() : null;
+    return {
+      mode: "idle",
+      transcript: "",
+      captions: "",
+      error: null,
+      supported: false,
+      nativeVoiceModeEnabled: true,
+      transcriptHistory: [],
+      voiceSpeed: settings?.talkingSpeed ?? 1,
+    };
   });
 
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  // Ref holds the accumulated final transcript so onend can emit it atomically
-  // without depending on React state timing.
   const finalTranscriptRef = useRef<string>("");
-  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const errorTimerRef = useRef<unknown>(null);
+  const silenceTimerRef = useRef<unknown>(null);
+  const finalizingRef = useRef(false);
+  const nativeVoiceModeRef = useRef(state.nativeVoiceModeEnabled);
 
-  // Detect browser support after mount to avoid SSR/hydration mismatch
+  useEffect(() => {
+    nativeVoiceModeRef.current = state.nativeVoiceModeEnabled;
+  }, [state.nativeVoiceModeEnabled]);
+
   useEffect(() => {
     const supported =
       getSpeechRecognitionClass() !== undefined && isSpeechSynthesisSupported();
     setState((prev) => ({ ...prev, supported }));
   }, []);
 
-  // Cleanup on unmount
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current as ReturnType<typeof setTimeout>);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
+    const handleClearVoiceData = () => {
+      clearSilenceTimer();
+      finalTranscriptRef.current = "";
+      setState((prev) => ({
+        ...prev,
+        transcript: "",
+        captions: "",
+        transcriptHistory: [],
+      }));
+    };
+
+    window.addEventListener("stepwise:clear-voice-data", handleClearVoiceData);
+
     return () => {
+      window.removeEventListener("stepwise:clear-voice-data", handleClearVoiceData);
       recognitionRef.current?.abort();
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current as ReturnType<typeof setTimeout>);
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current as ReturnType<typeof setTimeout>);
       if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
     };
-  }, []);
+  }, [clearSilenceTimer]);
+
+  const finalizeTurn = useCallback(() => {
+    const transcript = finalTranscriptRef.current.trim();
+    if (!transcript) {
+      clearSilenceTimer();
+      setState((prev) => ({ ...prev, mode: "idle", captions: prev.captions || "Listening…" }));
+      return;
+    }
+
+    if (finalizingRef.current) return;
+    finalizingRef.current = true;
+    clearSilenceTimer();
+
+    const entry = createTranscriptEntry("user", transcript);
+    setState((prev) => ({
+      ...prev,
+      mode: "idle",
+      transcript,
+      captions: transcript,
+      transcriptHistory: [...prev.transcriptHistory, entry],
+    }));
+
+    if (recognitionRef.current) {
+      recognitionRef.current.onend = null;
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+    }
+
+    finalTranscriptRef.current = "";
+
+    if (nativeVoiceModeRef.current && onTranscriptReady) {
+      onTranscriptReady(transcript);
+    }
+
+    window.setTimeout(() => {
+      finalizingRef.current = false;
+    }, 150);
+  }, [clearSilenceTimer, onTranscriptReady]);
 
   const startListening = useCallback(() => {
     const SpeechRecognitionClass = getSpeechRecognitionClass();
@@ -74,59 +163,79 @@ export function useVoiceTA(): VoiceControls {
       setState((prev) => ({
         ...prev,
         mode: "error",
+        captions: "Voice input unavailable",
         error: "Speech recognition is not supported in this browser.",
       }));
       return;
     }
 
-    // Abort any existing recognition session cleanly
     if (recognitionRef.current) {
       recognitionRef.current.onend = null;
       recognitionRef.current.abort();
       recognitionRef.current = null;
     }
 
-    // Cancel any in-progress TTS
     if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
 
+    clearSilenceTimer();
     finalTranscriptRef.current = "";
+    finalizingRef.current = false;
 
     try {
       const recognition = new SpeechRecognitionClass();
       recognition.lang = "en-US";
       recognition.interimResults = true;
       recognition.maxAlternatives = 1;
-      recognition.continuous = false;
+      recognition.continuous = true;
 
       recognition.onstart = () => {
-        setState({
+        setState((prev) => ({
+          ...prev,
           mode: "listening",
           transcript: "",
+          captions: "Listening…",
           error: null,
           supported: true,
-        });
+        }));
       };
 
       recognition.onresult = (event: SpeechRecognitionEvent) => {
-        // Accumulate all final results in the ref; build a live combined string
-        // (finals already captured + current interim) for real-time display.
         let interimTranscript = "";
+        let hasSpeech = false;
 
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const result = event.results[i];
           if (result.isFinal) {
-            finalTranscriptRef.current += result[0].transcript;
+            finalTranscriptRef.current += `${result[0].transcript} `;
+            hasSpeech = true;
           } else {
             interimTranscript += result[0].transcript;
+            hasSpeech = true;
           }
         }
 
-        const liveTranscript = finalTranscriptRef.current + interimTranscript;
-        setState((prev) => ({ ...prev, transcript: liveTranscript }));
+        if (hasSpeech) {
+          if (isSpeechSynthesisSupported() && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
+            window.speechSynthesis.cancel();
+            utteranceRef.current = null;
+          }
+
+          const liveTranscript = `${finalTranscriptRef.current}${interimTranscript}`.trim();
+          setState((prev) => ({
+            ...prev,
+            mode: "listening",
+            transcript: liveTranscript,
+            captions: liveTranscript || "Listening…",
+          }));
+
+          clearSilenceTimer();
+          silenceTimerRef.current = window.setTimeout(() => {
+            finalizeTurn();
+          }, 1800);
+        }
       };
 
       recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-        // "aborted" fires when we deliberately stop — not a real error.
         if (event.error === "aborted") return;
 
         const errorMessage =
@@ -142,8 +251,7 @@ export function useVoiceTA(): VoiceControls {
 
         setState((prev) => ({ ...prev, mode: "error", error: errorMessage }));
 
-        // Auto-clear error after 4 seconds so the UI doesn't stay stuck
-        if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+        if (errorTimerRef.current) clearTimeout(errorTimerRef.current as ReturnType<typeof setTimeout>);
         errorTimerRef.current = setTimeout(() => {
           setState((prev) =>
             prev.mode === "error" ? { ...prev, mode: "idle", error: null } : prev
@@ -152,12 +260,11 @@ export function useVoiceTA(): VoiceControls {
       };
 
       recognition.onend = () => {
-        // Emit mode AND final transcript atomically in a single setState so
-        // there is no render where mode is "idle" but transcript is still "".
         setState((prev) => ({
           ...prev,
           mode: "idle",
-          transcript: finalTranscriptRef.current || prev.transcript,
+          transcript: finalTranscriptRef.current.trim() || prev.transcript,
+          captions: finalTranscriptRef.current.trim() || prev.captions || "Listening…",
         }));
         recognitionRef.current = null;
       };
@@ -168,20 +275,21 @@ export function useVoiceTA(): VoiceControls {
       setState((prev) => ({
         ...prev,
         mode: "error",
+        captions: "Voice input unavailable",
         error:
           err instanceof Error
             ? err.message
             : "Failed to start speech recognition.",
       }));
     }
-  }, []);
+  }, [clearSilenceTimer, finalizeTurn]);
 
   const stopListening = useCallback(() => {
+    clearSilenceTimer();
     if (recognitionRef.current) {
-      // .stop() triggers onend which will update state
       recognitionRef.current.stop();
     }
-  }, []);
+  }, [clearSilenceTimer]);
 
   const speak = useCallback((text: string) => {
     if (!isSpeechSynthesisSupported()) {
@@ -195,16 +303,15 @@ export function useVoiceTA(): VoiceControls {
 
     const settings = loadSettings();
     if (!settings.ttsEnabled) {
-      // Respect user setting — simply no-op if TTS disabled
       return;
     }
 
-    // Stop recognition and any in-progress speech
     if (recognitionRef.current) {
       recognitionRef.current.onend = null;
       recognitionRef.current.abort();
       recognitionRef.current = null;
     }
+    clearSilenceTimer();
     window.speechSynthesis.cancel();
 
     const utterance = new SpeechSynthesisUtterance(text);
@@ -213,17 +320,26 @@ export function useVoiceTA(): VoiceControls {
     utterance.pitch = 1.0;
     utterance.volume = 1.0;
 
+    const entry = createTranscriptEntry("assistant", text);
+    setState((prev) => ({
+      ...prev,
+      mode: "speaking",
+      captions: text,
+      error: null,
+      transcriptHistory: [...prev.transcriptHistory, entry],
+    }));
+
     utterance.onstart = () => {
       setState((prev) => ({ ...prev, mode: "speaking", error: null }));
     };
 
     utterance.onend = () => {
-      setState((prev) => ({ ...prev, mode: "idle" }));
+      setState((prev) => ({ ...prev, mode: "idle", captions: prev.captions || "Listening…" }));
     };
 
     utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
       if (event.error === "interrupted" || event.error === "canceled") {
-        setState((prev) => ({ ...prev, mode: "idle" }));
+        setState((prev) => ({ ...prev, mode: "idle", captions: prev.captions || "Listening…" }));
         return;
       }
       setState((prev) => ({
@@ -235,13 +351,42 @@ export function useVoiceTA(): VoiceControls {
 
     utteranceRef.current = utterance;
     window.speechSynthesis.speak(utterance);
-  }, []);
+  }, [clearSilenceTimer]);
 
   const cancelSpeech = useCallback(() => {
     if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
     utteranceRef.current = null;
-    setState((prev) => ({ ...prev, mode: "idle" }));
+    setState((prev) => ({ ...prev, mode: "idle", captions: prev.captions || "Listening…" }));
   }, []);
 
-  return { state, startListening, stopListening, speak, cancelSpeech };
+  const toggleNativeVoiceMode = useCallback(() => {
+    setState((prev) => ({ ...prev, nativeVoiceModeEnabled: !prev.nativeVoiceModeEnabled }));
+  }, []);
+
+  const setVoiceSpeed = useCallback((speed: number) => {
+    const nextSpeed = Math.max(0.5, Math.min(2.0, speed));
+    saveSettings({ talkingSpeed: nextSpeed });
+    setState((prev) => ({ ...prev, voiceSpeed: nextSpeed }));
+  }, []);
+
+  const clearTranscriptHistory = useCallback(() => {
+    finalTranscriptRef.current = "";
+    setState((prev) => ({
+      ...prev,
+      transcript: "",
+      captions: "",
+      transcriptHistory: [],
+    }));
+  }, []);
+
+  return {
+    state,
+    startListening,
+    stopListening,
+    speak,
+    cancelSpeech,
+    toggleNativeVoiceMode,
+    setVoiceSpeed,
+    clearTranscriptHistory,
+  };
 }

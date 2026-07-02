@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, type FormEvent } from "react";
+import { useRef, useState, useCallback, useEffect, type FormEvent } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { Trash2, Settings } from "lucide-react";
@@ -27,7 +27,7 @@ interface ChatPanelProps {
 export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<UploadedFile[]>([]);
-  const voice = useVoiceTA();
+  const lastSpokenAssistantRef = useRef<string | null>(null);
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
 
   // Always start with empty messages so server and client render the same
@@ -38,6 +38,34 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   });
 
   const isLoading = status === "streaming" || status === "submitted";
+
+  const submitText = useCallback(
+    (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed || isLoading) return;
+
+      const imageUrls = files
+        .filter((f) => f.type.startsWith("image/"))
+        .map((f) => f.dataUrl);
+
+      const messageText =
+        imageUrls.length > 0
+          ? `${trimmed}\n\n[${imageUrls.length} image(s) attached — see vision context]`
+          : trimmed;
+
+      sendMessage({ text: messageText });
+      setInput("");
+      setFiles([]);
+    },
+    [files, isLoading, sendMessage]
+  );
+
+  const voice = useVoiceTA((transcript) => {
+    setInput(transcript);
+    window.setTimeout(() => {
+      submitText(transcript);
+    }, 80);
+  });
 
   // Restore persisted messages after hydration (client-only)
   useEffect(() => {
@@ -64,25 +92,32 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const handleSubmit = useCallback(
     (e: FormEvent<HTMLFormElement>) => {
       e.preventDefault();
-      const trimmed = input.trim();
-      if (!trimmed || isLoading) return;
-
-      // Build text payload (images are sent via vision API separately)
-      const imageUrls = files
-        .filter((f) => f.type.startsWith("image/"))
-        .map((f) => f.dataUrl);
-
-      const messageText =
-        imageUrls.length > 0
-          ? `${trimmed}\n\n[${imageUrls.length} image(s) attached — see vision context]`
-          : trimmed;
-
-      sendMessage({ text: messageText });
-      setInput("");
-      setFiles([]);
+      submitText(input);
     },
-    [input, files, isLoading, sendMessage]
+    [input, submitText]
   );
+
+  useEffect(() => {
+    const lastAssistantMessage = [...messages]
+      .reverse()
+      .find((message) => message.role === "assistant");
+    const lastAssistantText = lastAssistantMessage?.parts
+      .filter((part) => part.type === "text")
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("") ?? "";
+
+    if (!lastAssistantText || !voice.state.nativeVoiceModeEnabled || !voice.state.supported) {
+      return;
+    }
+
+    const assistantId = lastAssistantMessage?.id ?? null;
+    if (assistantId && assistantId === lastSpokenAssistantRef.current) {
+      return;
+    }
+
+    lastSpokenAssistantRef.current = assistantId;
+    voice.speak(lastAssistantText);
+  }, [messages, voice]);
 
   const handleCaptureWhiteboard = useCallback(async () => {
     const payload = await captureWhiteboard();

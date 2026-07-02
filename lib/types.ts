@@ -28,11 +28,22 @@ export interface ChatSession {
 
 export type VoiceMode = "idle" | "listening" | "speaking" | "error";
 
+export interface VoiceTranscriptEntry {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  createdAt: string;
+}
+
 export interface VoiceState {
   mode: VoiceMode;
   transcript: string;
+  captions: string;
   error: string | null;
   supported: boolean;
+  nativeVoiceModeEnabled: boolean;
+  transcriptHistory: VoiceTranscriptEntry[];
+  voiceSpeed: number;
 }
 
 export interface VoiceControls {
@@ -41,6 +52,9 @@ export interface VoiceControls {
   stopListening: () => void;
   speak: (text: string) => void;
   cancelSpeech: () => void;
+  toggleNativeVoiceMode: () => void;
+  setVoiceSpeed: (speed: number) => void;
+  clearTranscriptHistory: () => void;
 }
 
 // ─── Diagram Blocks ───────────────────────────────────────────────────────────
