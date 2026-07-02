@@ -6,6 +6,7 @@ import type { Editor } from "@tldraw/tldraw";
 import { MessageSquare, PenTool } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { WhiteboardPanel } from "@/components/whiteboard/WhiteboardPanel";
+import { WhiteboardActionBar } from "@/components/whiteboard/WhiteboardActionBar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWhiteboardCapture } from "@/hooks/useWhiteboardCapture";
 
@@ -35,6 +36,11 @@ const DEFAULT_CHAT_WIDTH = 420;
 export function AppShell() {
   const { editorRef, capture } = useWhiteboardCapture();
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH);
+
+  // Refs that ChatPanel populates once mounted, so the whiteboard action bar
+  // can trigger chat-side handlers without crossing the dynamic-import boundary.
+  const describeRef = useRef<(() => void) | null>(null);
+  const checkWorkRef = useRef<(() => void) | null>(null);
 
   // Refs so drag handlers never re-bind to stale closures
   const isDraggingRef = useRef(false);
@@ -95,7 +101,12 @@ export function AppShell() {
           className="flex flex-shrink-0 flex-col border-r border-border bg-background overflow-hidden"
           style={{ width: chatWidth }}
         >
-          <ChatPanel captureWhiteboard={capture} />
+          <ChatPanel
+            captureWhiteboard={capture}
+            editorRef={editorRef}
+            describeRef={describeRef}
+            checkWorkRef={checkWorkRef}
+          />
         </div>
 
         {/* Drag handle */}
@@ -107,7 +118,6 @@ export function AppShell() {
           aria-orientation="vertical"
           aria-label="Resize chat panel"
         >
-          {/* Visual grip dots */}
           <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 flex flex-col items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
             <span className="h-1 w-1 rounded-full bg-primary/60" />
             <span className="h-1 w-1 rounded-full bg-primary/60" />
@@ -120,6 +130,10 @@ export function AppShell() {
         {/* Whiteboard — fills remaining space */}
         <div className="relative flex-1 overflow-hidden">
           <WhiteboardPanel onEditorReady={handleEditorReady} />
+          <WhiteboardActionBar
+            onDescribeWhiteboard={() => describeRef.current?.()}
+            onCheckWork={() => checkWorkRef.current?.()}
+          />
         </div>
       </div>
 
@@ -143,7 +157,12 @@ export function AppShell() {
             value="chat"
             className="flex-1 overflow-hidden mt-0 data-[state=active]:flex data-[state=active]:flex-col"
           >
-            <ChatPanel captureWhiteboard={capture} />
+            <ChatPanel
+              captureWhiteboard={capture}
+              editorRef={editorRef}
+              describeRef={describeRef}
+              checkWorkRef={checkWorkRef}
+            />
           </TabsContent>
 
           <TabsContent
@@ -151,6 +170,10 @@ export function AppShell() {
             className="relative flex-1 overflow-hidden mt-0"
           >
             <WhiteboardPanel onEditorReady={handleEditorReady} />
+            <WhiteboardActionBar
+              onDescribeWhiteboard={() => describeRef.current?.()}
+              onCheckWork={() => checkWorkRef.current?.()}
+            />
           </TabsContent>
         </Tabs>
       </div>

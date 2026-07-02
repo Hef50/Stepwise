@@ -1,17 +1,13 @@
 "use client";
 
-import { useRef, useEffect, useCallback, type FormEvent, type KeyboardEvent } from "react";
-import { Send, Camera, Square } from "lucide-react";
+import { useRef, useEffect, type FormEvent, type KeyboardEvent } from "react";
+import { Send, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { VoiceControls } from "./VoiceControls";
 import { FileUpload } from "./FileUpload";
-import type { VoiceControls as VoiceControlsType, UploadedFile } from "@/lib/types";
+import { CourseMaterialUpload } from "./CourseMaterialUpload";
+import type { VoiceControls as VoiceControlsType, UploadedFile, CourseMaterial } from "@/lib/types";
 
 interface ChatInputProps {
   value: string;
@@ -22,7 +18,10 @@ interface ChatInputProps {
   voice: VoiceControlsType;
   files: UploadedFile[];
   onFilesChange: (files: UploadedFile[]) => void;
-  onCaptureWhiteboard: () => void;
+  courseMaterials: CourseMaterial[];
+  onAddCourseMaterial: (material: CourseMaterial) => void;
+  onToggleCourseMaterial: (id: string) => void;
+  onRemoveCourseMaterial: (id: string) => void;
   lastAssistantMessage?: string;
 }
 
@@ -35,15 +34,16 @@ export function ChatInput({
   voice,
   files,
   onFilesChange,
-  onCaptureWhiteboard,
+  courseMaterials,
+  onAddCourseMaterial,
+  onToggleCourseMaterial,
+  onRemoveCourseMaterial,
   lastAssistantMessage,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // Track whether we are currently in a voice session so we know when to
-  // flush the final transcript into the input.
   const wasListeningRef = useRef(false);
 
-  // Auto-resize textarea as content grows
+  // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -51,21 +51,14 @@ export function ChatInput({
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [value]);
 
-  // Voice transcript → input integration.
-  // We track the listening→idle transition: when recognition ends with a
-  // non-empty transcript, push it into the input in one clean update.
+  // Voice transcript → input
   useEffect(() => {
     const { mode, transcript } = voice.state;
-
-    if (mode === "listening") {
-      wasListeningRef.current = true;
-    }
-
+    if (mode === "listening") wasListeningRef.current = true;
     if (mode === "idle" && wasListeningRef.current) {
       wasListeningRef.current = false;
       if (transcript) {
         onChange(transcript);
-        // Focus the textarea so the user can immediately edit or submit
         setTimeout(() => textareaRef.current?.focus(), 0);
       }
     }
@@ -84,14 +77,16 @@ export function ChatInput({
   const isListening = voice.state.mode === "listening";
 
   return (
-    <form onSubmit={onSubmit} className="flex flex-col gap-2 p-3 border-t border-border bg-background">
-
-      {/* Error message */}
+    <form
+      onSubmit={onSubmit}
+      className="flex flex-col gap-2 p-3 border-t border-border bg-background"
+    >
+      {/* Voice error banner */}
       {voice.state.error && (
         <p className="text-xs text-destructive px-1">{voice.state.error}</p>
       )}
 
-      {/* Attached files preview strip */}
+      {/* Attached file chips */}
       {files.length > 0 && (
         <div className="flex flex-wrap gap-1 px-1">
           {files.map((f) => (
@@ -105,27 +100,20 @@ export function ChatInput({
         </div>
       )}
 
+      {/* ── Input row: attachments | textarea | voice + send ── */}
       <div className="flex items-end gap-2">
-        {/* Left toolbar */}
-        <div className="flex flex-shrink-0 items-center">
+        {/* Left: file + course material buttons */}
+        <div className="flex flex-shrink-0 items-center gap-0.5">
           <FileUpload files={files} onFilesChange={onFilesChange} />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={onCaptureWhiteboard}
-                aria-label="Send whiteboard to AI"
-              >
-                <Camera className="h-5 w-5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Analyze whiteboard with AI vision</TooltipContent>
-          </Tooltip>
+          <CourseMaterialUpload
+            materials={courseMaterials}
+            onAdd={onAddCourseMaterial}
+            onToggle={onToggleCourseMaterial}
+            onRemove={onRemoveCourseMaterial}
+          />
         </div>
 
-        {/* Textarea — shows live interim transcript as a placeholder while listening */}
+        {/* Centre: textarea with live-listen overlay */}
         <div className="relative flex-1">
           <Textarea
             ref={textareaRef}
@@ -134,17 +122,14 @@ export function ChatInput({
             onKeyDown={handleKeyDown}
             placeholder={
               isListening
-                ? voice.state.transcript
-                  ? voice.state.transcript
-                  : "Listening…"
-                : "Ask anything… (Enter to send, Shift+Enter for new line)"
+                ? voice.state.transcript || "Listening…"
+                : "Ask anything… (Enter to send)"
             }
             disabled={isLoading || isListening}
             rows={1}
-            className="flex-1 resize-none overflow-hidden min-h-[44px] max-h-[200px] py-3 w-full"
+            className="resize-none overflow-hidden min-h-[44px] max-h-[200px] py-3 w-full"
             aria-label="Chat message input"
           />
-          {/* Live transcript overlay shown while listening */}
           {isListening && (
             <div className="absolute inset-0 flex items-start rounded-md bg-red-50/80 dark:bg-red-950/40 px-3 py-3 pointer-events-none">
               <div className="flex items-center gap-2 w-full">
@@ -157,7 +142,7 @@ export function ChatInput({
           )}
         </div>
 
-        {/* Right toolbar */}
+        {/* Right: voice controls + send/stop */}
         <div className="flex flex-shrink-0 items-center gap-1">
           <VoiceControls voice={voice} lastAssistantMessage={lastAssistantMessage} />
           {isLoading ? (

@@ -1,10 +1,11 @@
-import type { MessageBlock, DiagramType } from "@/lib/types";
+import type { MessageBlock, DiagramType, WhiteboardShapeInstruction, WhiteboardShapeKind } from "@/lib/types";
 
-const FENCE_PATTERN = /```(mermaid|schemdraw)\n([\s\S]*?)```/g;
+const FENCE_PATTERN = /```(mermaid|schemdraw|whiteboard)\n([\s\S]*?)```/g;
 
 /**
  * Splits an assistant message into alternating text and diagram blocks.
- * Diagram blocks are extracted from fenced code blocks tagged `mermaid` or `schemdraw`.
+ * Diagram blocks are extracted from fenced code blocks tagged `mermaid`,
+ * `schemdraw`, or `whiteboard` (AI-to-canvas instructions).
  */
 export function parseMessageBlocks(content: string): MessageBlock[] {
   const blocks: MessageBlock[] = [];
@@ -25,11 +26,16 @@ export function parseMessageBlocks(content: string): MessageBlock[] {
       }
     }
 
-    blocks.push({
-      kind: "diagram",
-      diagramType: lang as DiagramType,
-      code: code.trim(),
-    });
+    if (lang === "whiteboard") {
+      // Whiteboard blocks are handled separately by parseWhiteboardInstructions
+      // and are intentionally not rendered in the chat bubble.
+    } else {
+      blocks.push({
+        kind: "diagram",
+        diagramType: lang as DiagramType,
+        code: code.trim(),
+      });
+    }
 
     lastIndex = matchStart + fullMatch.length;
   }
@@ -48,4 +54,45 @@ export function parseMessageBlocks(content: string): MessageBlock[] {
   }
 
   return blocks;
+}
+
+/**
+ * Extracts all ```whiteboard … ``` blocks from an assistant message and
+ * parses each as a WhiteboardShapeInstruction JSON object.
+ * Invalid JSON entries are silently skipped.
+ */
+export function parseWhiteboardInstructions(
+  content: string
+): WhiteboardShapeInstruction[] {
+  const instructions: WhiteboardShapeInstruction[] = [];
+  const pattern = /```whiteboard\n([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = pattern.exec(content)) !== null) {
+    const raw = m[1].trim();
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "kind" in parsed &&
+        "content" in parsed &&
+        typeof (parsed as { kind: unknown }).kind === "string" &&
+        typeof (parsed as { content: unknown }).content === "string"
+      ) {
+        const { kind, content: shapeContent, x, y, width } = parsed as {
+          kind: WhiteboardShapeKind;
+          content: string;
+          x?: number;
+          y?: number;
+          width?: number;
+        };
+        instructions.push({ kind, content: shapeContent, x, y, width });
+      }
+    } catch {
+      // Skip malformed blocks
+    }
+  }
+
+  return instructions;
 }

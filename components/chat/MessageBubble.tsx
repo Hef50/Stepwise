@@ -5,13 +5,15 @@ import { Bot, User, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { MessageRenderer } from "@/components/diagrams/MessageRenderer";
 import { Button } from "@/components/ui/button";
+import type { WhiteboardShapeInstruction } from "@/lib/types";
 
 interface MessageBubbleProps {
   message: UIMessage;
   onDelete: (id: string) => void;
+  onSendToWhiteboard: (instructions: WhiteboardShapeInstruction[]) => void;
 }
 
-export function MessageBubble({ message, onDelete }: MessageBubbleProps) {
+export function MessageBubble({ message, onDelete, onSendToWhiteboard }: MessageBubbleProps) {
   const isUser = message.role === "user";
 
   const textContent = message.parts
@@ -55,7 +57,10 @@ export function MessageBubble({ message, onDelete }: MessageBubbleProps) {
           {isUser ? (
             <p className="whitespace-pre-wrap leading-relaxed">{textContent}</p>
           ) : (
-            <MessageRenderer content={textContent} />
+            <MessageRenderer
+              content={textContent}
+              onSendToWhiteboard={onSendToWhiteboard}
+            />
           )}
         </div>
 

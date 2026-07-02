@@ -6,18 +6,39 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageBubble } from "./MessageBubble";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Bot } from "lucide-react";
+import type { WhiteboardShapeInstruction } from "@/lib/types";
 
 interface ChatMessagesProps {
   messages: UIMessage[];
   isLoading: boolean;
   onDeleteMessage: (id: string) => void;
+  onSendToWhiteboard: (instructions: WhiteboardShapeInstruction[]) => void;
 }
 
-export function ChatMessages({ messages, isLoading, onDeleteMessage }: ChatMessagesProps) {
+export function ChatMessages({
+  messages,
+  isLoading,
+  onDeleteMessage,
+  onSendToWhiteboard,
+}: ChatMessagesProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRootRef = useRef<HTMLDivElement>(null);
 
+  // Auto-scroll to the newest content, but ONLY when the user is already near
+  // the bottom. Using instant (non-smooth) scrolling avoids the jarring up/down
+  // snapping that smooth-scroll causes while tokens stream in rapidly.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const root = scrollRootRef.current;
+    const viewport = root?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]"
+    );
+    if (!viewport) return;
+    const distanceFromBottom =
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    // Only follow the stream if the user hasn't scrolled up to read history.
+    if (distanceFromBottom < 120) {
+      viewport.scrollTop = viewport.scrollHeight;
+    }
   }, [messages, isLoading]);
 
   if (messages.length === 0 && !isLoading) {
@@ -38,13 +59,14 @@ export function ChatMessages({ messages, isLoading, onDeleteMessage }: ChatMessa
   }
 
   return (
-    <ScrollArea className="flex-1 px-3">
+    <ScrollArea ref={scrollRootRef} className="flex-1 px-3">
       <div className="space-y-4 py-4">
         {messages.map((message) => (
           <MessageBubble
             key={message.id}
             message={message}
             onDelete={onDeleteMessage}
+            onSendToWhiteboard={onSendToWhiteboard}
           />
         ))}
 

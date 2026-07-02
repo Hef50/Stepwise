@@ -73,11 +73,60 @@ export interface UploadedFile {
 
 // ─── Vision API ───────────────────────────────────────────────────────────────
 
+/** Determines how the VLM interprets the whiteboard image. */
+export type VisionTask = "describe" | "check_work";
+
 export interface VisionRequest {
-  prompt: string;
+  prompt?: string;
   images: string[];
+  /** Determines the VLM system prompt / interpretation mode. Defaults to "describe". */
+  task?: VisionTask;
+  /** Optional problem statement or tutor context used in "check_work" grading. */
+  context?: string;
 }
 
 export interface VisionResponse {
   analysis: string;
+  /** Echoed task so callers know which mode produced the response. */
+  task: VisionTask;
+}
+
+// ─── Course Materials ─────────────────────────────────────────────────────────
+
+export interface CourseMaterial {
+  id: string;
+  name: string;
+  /** Full plain-text content extracted from the PDF. */
+  text: string;
+  pageCount: number;
+  uploadedAt: string;
+  /** Whether this material is currently injected into the tutor system prompt. */
+  active: boolean;
+}
+
+export interface PdfExtractResponse {
+  name: string;
+  text: string;
+  pageCount: number;
+}
+
+// ─── Whiteboard Shape Instructions ────────────────────────────────────────────
+
+export type WhiteboardShapeKind = "text" | "latex" | "mermaid" | "schemdraw";
+
+/**
+ * A single instruction for placing an AI-authored shape on the tldraw canvas.
+ * Emitted by the AI in a structured fenced block and parsed by the chat pipeline.
+ */
+export interface WhiteboardShapeInstruction {
+  kind: WhiteboardShapeKind;
+  /** The text, LaTeX expression, Mermaid source, or Schemdraw code. */
+  content: string;
+  /** Optional canvas coordinates. Defaults to auto-placement if omitted. */
+  x?: number;
+  y?: number;
+  /** Optional display width in px. */
+  width?: number;
+  /** Optional display height in px (text shapes auto-calculate from content). */
+  height?: number;
 }
