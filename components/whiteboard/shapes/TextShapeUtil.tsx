@@ -7,6 +7,7 @@
  * Do NOT import from sibling shape files.
  */
 
+import { useRef } from "react";
 import {
   HTMLContainer,
   Rectangle2d,
@@ -17,8 +18,48 @@ import {
   type RecordProps,
   type Geometry2d,
   type TLResizeInfo,
+  type TLShapeId,
 } from "@tldraw/tldraw";
 import { DEFAULT_SHAPE_WIDTH, DEFAULT_SHAPE_HEIGHT, MIN_WIDTH, MIN_HEIGHT } from "./baseShape";
+import { useAutoSize } from "./useAutoSize";
+
+// ── Renderer component ────────────────────────────────────────────────────────
+function TextRenderer({
+  shapeId,
+  text,
+  w,
+}: {
+  shapeId: TLShapeId;
+  text: string;
+  w: number;
+}) {
+  const outerRef = useRef<HTMLDivElement>(null);
+  useAutoSize(shapeId, outerRef, { minHeight: 48 });
+
+  return (
+    <div
+      ref={outerRef}
+      style={{
+        width: w,
+        padding: "12px 14px",
+        backgroundColor: "hsl(var(--background, 0 0% 100%))",
+        border: "1.5px solid hsl(var(--border, 214 32% 91%))",
+        borderRadius: 8,
+        fontSize: 14,
+        lineHeight: 1.6,
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        fontFamily: "inherit",
+        color: "hsl(var(--foreground, 222 47% 11%))",
+        boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
+        boxSizing: "border-box",
+        pointerEvents: "all",
+      }}
+    >
+      {text}
+    </div>
+  );
+}
 
 // ── Type augmentation ────────────────────────────────────────────────────────
 export const AI_TEXT_TYPE = "ai-text" as const;
@@ -66,27 +107,7 @@ export class TextShapeUtil extends ShapeUtil<AiTextShape> {
   override component(shape: AiTextShape) {
     return (
       <HTMLContainer>
-        <div
-          style={{
-            width: shape.props.w,
-            height: shape.props.h,
-            overflow: "auto",
-            padding: "12px 14px",
-            backgroundColor: "hsl(var(--background, 0 0% 100%))",
-            border: "1.5px solid hsl(var(--border, 214 32% 91%))",
-            borderRadius: 8,
-            fontSize: 14,
-            lineHeight: 1.6,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            fontFamily: "inherit",
-            color: "hsl(var(--foreground, 222 47% 11%))",
-            boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
-            pointerEvents: "all",
-          }}
-        >
-          {shape.props.text}
-        </div>
+        <TextRenderer shapeId={shape.id} text={shape.props.text} w={shape.props.w} />
       </HTMLContainer>
     );
   }

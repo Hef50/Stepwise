@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useId } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AlertTriangle } from "lucide-react";
+import { sanitizeMermaid } from "@/lib/markdown/sanitizeMermaid";
 
 interface MermaidDiagramProps {
   code: string;
@@ -31,7 +32,7 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
           fontFamily: "inherit",
         });
 
-        const { svg } = await mermaid.render(containerId, code);
+        const { svg } = await mermaid.render(containerId, sanitizeMermaid(code));
 
         if (!cancelled && containerRef.current) {
           containerRef.current.innerHTML = svg;

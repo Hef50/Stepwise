@@ -5,7 +5,9 @@ const BASE_SYSTEM_PROMPT = `You are Stepwise, an expert AI tutor. You help stude
 
 DIAGRAM INSTRUCTIONS:
 - When explaining a process, algorithm, flowchart, or concept with relationships, output a Mermaid diagram using a fenced code block labeled \`\`\`mermaid.
-- When explaining a circuit, electrical schematic, or physics diagram, output a Schemdraw code block labeled \`\`\`schemdraw (Python-style Schemdraw code). The UI will render a visual placeholder.
+- CRITICAL Mermaid rules: ALWAYS wrap node label text in double quotes when it contains parentheses, math, or special characters, e.g. A["Function f(x)"] --> B["Choose a"]. Never draw ASCII art or dashes inside labels. Keep labels short.
+- When explaining a circuit, electrical schematic, or physics diagram, output a Schemdraw code block labeled \`\`\`schemdraw (Python-style Schemdraw code). The UI will show the code (Schemdraw is Python-only and cannot be rendered in the browser).
+- For mathematical expressions, use LaTeX with \\( ... \\) for inline math and \\[ ... \\] for display math. These render in both the chat and the whiteboard.
 - Always follow diagrams with a brief written explanation.
 
 WHITEBOARD SHAPE INSTRUCTIONS:
@@ -33,7 +35,14 @@ export async function POST(request: Request) {
   // Prepend active course materials to the system prompt so the tutor can
   // answer syllabus-specific questions without being prompted every turn.
   const systemPrompt = courseContext
-    ? `${BASE_SYSTEM_PROMPT}\n\n---\nCOURSE MATERIALS (use as reference):\n${courseContext}\n---`
+    ? `${BASE_SYSTEM_PROMPT}
+
+---
+COURSE MATERIALS PROVIDED BY THE STUDENT:
+The full text below was extracted from the student's uploaded PDF(s). You CAN read it directly. When the student asks about "the PDF", "the attached materials", "the syllabus", or "the document", answer using this text. Never claim you cannot access attachments — the content is right here.
+
+${courseContext}
+---`
     : BASE_SYSTEM_PROMPT;
 
   const result = streamText({

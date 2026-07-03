@@ -20,8 +20,11 @@ import {
   type RecordProps,
   type Geometry2d,
   type TLResizeInfo,
+  type TLShapeId,
 } from "@tldraw/tldraw";
 import { DEFAULT_SHAPE_WIDTH, DEFAULT_SHAPE_HEIGHT, MIN_WIDTH, MIN_HEIGHT } from "./baseShape";
+import { useAutoSize } from "./useAutoSize";
+import { sanitizeMermaid } from "@/lib/markdown/sanitizeMermaid";
 
 // ── Type augmentation ────────────────────────────────────────────────────────
 export const AI_MERMAID_TYPE = "ai-mermaid" as const;
@@ -41,11 +44,23 @@ declare module "@tldraw/tldraw" {
 export type AiMermaidShape = TLBaseShape<typeof AI_MERMAID_TYPE, AiMermaidProps>;
 
 // ── Mermaid renderer component ───────────────────────────────────────────────
-function MermaidRenderer({ code, w, h }: { code: string; w: number; h: number }) {
+function MermaidRenderer({
+  shapeId,
+  code,
+  w,
+}: {
+  shapeId: TLShapeId;
+  code: string;
+  w: number;
+}) {
   const id = useId();
   const containerId = `mmd-shape-${id.replace(/:/g, "")}`;
   const containerRef = useRef<HTMLDivElement>(null);
+  const outerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Keep the shape geometry in sync with the (scaled) rendered diagram height.
+  useAutoSize(shapeId, outerRef, { minHeight: 80 });
 
   useEffect(() => {
     let cancelled = false;
@@ -60,9 +75,16 @@ function MermaidRenderer({ code, w, h }: { code: string; w: number; h: number })
           securityLevel: "loose",
           fontFamily: "inherit",
         });
-        const { svg } = await mermaid.render(containerId, code);
+        const { svg } = await mermaid.render(containerId, sanitizeMermaid(code));
         if (!cancelled && containerRef.current) {
           containerRef.current.innerHTML = svg;
+          // Scale the diagram to fit the shape width so nothing is clipped.
+          const svgEl = containerRef.current.querySelector("svg");
+          if (svgEl) {
+            svgEl.style.maxWidth = "100%";
+            svgEl.style.height = "auto";
+            svgEl.removeAttribute("height");
+          }
         }
       } catch (err) {
         if (!cancelled) {
@@ -79,9 +101,9 @@ function MermaidRenderer({ code, w, h }: { code: string; w: number; h: number })
 
   return (
     <div
+      ref={outerRef}
       style={{
         width: w,
-        minHeight: h,
         padding: "12px",
         backgroundColor: "hsl(var(--background, 0 0% 100%))",
         border: "1.5px solid hsl(var(--border, 214 32% 91%))",
@@ -90,7 +112,7 @@ function MermaidRenderer({ code, w, h }: { code: string; w: number; h: number })
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        overflow: "hidden",
+        boxSizing: "border-box",
       }}
     >
       {error ? (
@@ -107,10 +129,7 @@ function MermaidRenderer({ code, w, h }: { code: string; w: number; h: number })
           {error}
         </div>
       ) : (
-        <div
-          ref={containerRef}
-          style={{ maxWidth: "100%", overflow: "auto" }}
-        />
+        <div ref={containerRef} style={{ width: "100%", display: "flex", justifyContent: "center" }} />
       )}
     </div>
   );
@@ -146,9 +165,9 @@ export class MermaidShapeUtil extends ShapeUtil<AiMermaidShape> {
     return (
       <HTMLContainer>
         <MermaidRenderer
+          shapeId={shape.id}
           code={shape.props.code}
           w={shape.props.w}
-          h={shape.props.h}
         />
       </HTMLContainer>
     );

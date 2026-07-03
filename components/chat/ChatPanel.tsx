@@ -62,18 +62,22 @@ export function ChatPanel({ captureWhiteboard, editorRef, describeRef, checkWork
     .map((m) => `### ${m.name}\n${m.text}`)
     .join("\n\n");
 
-  // Stable transport — created once; reads courseContextRef on every request.
+  // Stable transport — created once; reads courseContextRef on every request via
+  // prepareSendMessagesRequest so active course materials are always injected.
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
         api: "/api/chat",
-        fetch: async (url, options) => {
-          const existing = JSON.parse((options?.body as string) ?? "{}") as Record<string, unknown>;
-          if (courseContextRef.current) {
-            existing.courseContext = courseContextRef.current;
-          }
-          return fetch(url, { ...options, body: JSON.stringify(existing) });
-        },
+        prepareSendMessagesRequest: ({ id, messages, trigger, messageId, body }) => ({
+          body: {
+            ...body,
+            id,
+            messages,
+            trigger,
+            messageId,
+            courseContext: courseContextRef.current || undefined,
+          },
+        }),
       }),
     [] // stable — never recreated
   );

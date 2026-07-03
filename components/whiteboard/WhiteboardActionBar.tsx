@@ -15,8 +15,9 @@ interface WhiteboardActionBarProps {
 }
 
 /**
- * Floating action bar overlaid on the tldraw canvas (top-right corner).
- * Houses whiteboard-specific AI actions so the chat input stays uncluttered.
+ * Floating action bar overlaid on the tldraw canvas (top-centre).
+ * Top-centre avoids tldraw's own UI: the main menu (top-left), the style
+ * panel (top-right), and the toolbar (bottom-centre).
  */
 export function WhiteboardActionBar({
   onDescribeWhiteboard,
@@ -24,37 +25,37 @@ export function WhiteboardActionBar({
 }: WhiteboardActionBarProps) {
   return (
     <TooltipProvider>
-      <div className="absolute top-3 right-3 z-10 flex flex-col gap-2">
+      <div className="pointer-events-none absolute top-3 left-1/2 z-[500] flex -translate-x-1/2 gap-2">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
               type="button"
-              size="icon"
+              size="sm"
               variant="secondary"
               onClick={onDescribeWhiteboard}
-              aria-label="Describe whiteboard"
-              className="h-10 w-10 shadow-md border border-border bg-background/90 backdrop-blur-sm hover:bg-secondary"
+              className="pointer-events-auto gap-2 shadow-md border border-border bg-background/95 backdrop-blur-sm hover:bg-secondary"
             >
-              <Camera className="h-5 w-5" />
+              <Camera className="h-4 w-4" />
+              Describe
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="left">What&apos;s on my whiteboard?</TooltipContent>
+          <TooltipContent>Ask the AI what&apos;s on the whiteboard</TooltipContent>
         </Tooltip>
 
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
               type="button"
-              size="icon"
+              size="sm"
               variant="secondary"
               onClick={onCheckWork}
-              aria-label="Check my work"
-              className="h-10 w-10 shadow-md border border-border bg-background/90 backdrop-blur-sm hover:bg-secondary"
+              className="pointer-events-auto gap-2 shadow-md border border-border bg-background/95 backdrop-blur-sm hover:bg-secondary"
             >
-              <ClipboardCheck className="h-5 w-5" />
+              <ClipboardCheck className="h-4 w-4" />
+              Check my work
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="left">Check my work</TooltipContent>
+          <TooltipContent>Have the AI grade your work on the whiteboard</TooltipContent>
         </Tooltip>
       </div>
     </TooltipProvider>

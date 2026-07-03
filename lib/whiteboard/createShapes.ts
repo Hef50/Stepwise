@@ -21,11 +21,14 @@ function estimateTextHeight(text: string, w: number): number {
   return Math.min(Math.max(lineCount * 22 + 32, 80), 500);
 }
 
+// Initial placement heights — deliberately generous so nothing is clipped on
+// first render. useAutoSize on each shape will shrink (or grow) them to fit
+// actual content, leaving visual gaps between shapes rather than overlaps.
 const DEFAULT_H: Record<string, number> = {
   text: 200,
-  latex: 80,
-  mermaid: 220,
-  schemdraw: 280,
+  latex: 100,
+  mermaid: 600, // large diagrams (e.g. Krebs cycle) need room before auto-size fires
+  schemdraw: 320,
 };
 
 /**

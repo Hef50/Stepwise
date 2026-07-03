@@ -45,7 +45,7 @@ export interface VoiceControls {
 
 // ─── Diagram Blocks ───────────────────────────────────────────────────────────
 
-export type DiagramType = "mermaid" | "schemdraw";
+export type DiagramType = "mermaid" | "schemdraw" | "svg";
 
 export interface TextBlock {
   kind: "text";
@@ -112,7 +112,7 @@ export interface PdfExtractResponse {
 
 // ─── Whiteboard Shape Instructions ────────────────────────────────────────────
 
-export type WhiteboardShapeKind = "text" | "latex" | "mermaid" | "schemdraw";
+export type WhiteboardShapeKind = "text" | "latex" | "mermaid" | "schemdraw" | "svg";
 
 /**
  * A single instruction for placing an AI-authored shape on the tldraw canvas.

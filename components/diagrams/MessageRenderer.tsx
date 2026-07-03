@@ -5,6 +5,7 @@ import { LayoutPanelLeft } from "lucide-react";
 import { parseMessageBlocks } from "@/lib/markdown/parseBlocks";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { SchemdrawDiagram } from "./SchemdrawDiagram";
+import { RichText } from "./RichText";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { Button } from "@/components/ui/button";
 import type { WhiteboardShapeInstruction, WhiteboardShapeKind } from "@/lib/types";
@@ -29,9 +30,9 @@ export function MessageRenderer({ content, onSendToWhiteboard }: MessageRenderer
           return (
             <div
               key={index}
-              className="prose prose-sm max-w-none dark:prose-invert whitespace-pre-wrap leading-relaxed"
+              className="prose prose-sm max-w-none dark:prose-invert"
             >
-              {block.content}
+              <RichText content={block.content} />
             </div>
           );
         }
