@@ -229,7 +229,10 @@ export function ChatPanel({ captureWhiteboard, editorRef, describeRef, checkWork
         body: JSON.stringify({ images: [imageDataUrl], task, context }),
       });
 
-      if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `Vision request failed (${res.status})`);
+      }
       const data = (await res.json()) as VisionResponse;
       return data.analysis;
     },
@@ -250,7 +253,8 @@ export function ChatPanel({ captureWhiteboard, editorRef, describeRef, checkWork
         text: `[Whiteboard snapshot]\n${analysis}`,
       });
     } catch (err) {
-      console.error("[ChatPanel] Describe whiteboard error:", err);
+      const msg = err instanceof Error ? err.message : "Vision analysis failed.";
+      sendMessage({ text: `⚠️ Couldn't analyze the whiteboard: ${msg}` });
     }
   }, [captureWhiteboard, callVision, sendMessage]);
 
@@ -285,7 +289,8 @@ export function ChatPanel({ captureWhiteboard, editorRef, describeRef, checkWork
       });
       if (contextFromInput) setInput("");
     } catch (err) {
-      console.error("[ChatPanel] Check work error:", err);
+      const msg = err instanceof Error ? err.message : "Vision analysis failed.";
+      sendMessage({ text: `⚠️ Couldn't check your work: ${msg}` });
     }
   }, [captureWhiteboard, callVision, sendMessage, input, messages]);
 

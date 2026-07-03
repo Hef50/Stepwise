@@ -32,6 +32,12 @@ export async function POST(request: Request) {
   };
   const { messages, courseContext } = body;
 
+  console.log(
+    `[chat] courseContext received: ${
+      courseContext ? `${courseContext.length} chars` : "none"
+    }`
+  );
+
   // Prepend active course materials to the system prompt so the tutor can
   // answer syllabus-specific questions without being prompted every turn.
   const systemPrompt = courseContext

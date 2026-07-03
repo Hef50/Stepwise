@@ -1,4 +1,5 @@
-import { openrouterClient, VISION_MODEL } from "@/lib/ai/gemini";
+import { generateText } from "ai";
+import { google, VISION_MODELS } from "@/lib/ai/gemini";
 import type { VisionRequest, VisionResponse, VisionTask } from "@/lib/types";
 
 const SYSTEM_PROMPTS: Record<VisionTask, string> = {
@@ -7,6 +8,33 @@ const SYSTEM_PROMPTS: Record<VisionTask, string> = {
   check_work:
     "You are an expert AI tutor grading a student's work shown on the whiteboard. Review the solution carefully. Point out any errors or misconceptions, explain the correct approach step by step, and encourage the student. Be specific about what is right and what needs improvement.",
 };
+
+/** Runs a single vision request against one Gemini model. */
+async function runVision(
+  model: string,
+  systemPrompt: string,
+  userText: string,
+  images: string[]
+): Promise<string> {
+  const { text } = await generateText({
+    model: google(model),
+    system: systemPrompt,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: userText },
+          ...images.map((dataUrl) => ({
+            type: "image" as const,
+            image: dataUrl,
+          })),
+        ],
+      },
+    ],
+    maxOutputTokens: 2048,
+  });
+  return text;
+}
 
 export async function POST(request: Request): Promise<Response> {
   const body = (await request.json()) as VisionRequest;
@@ -21,7 +49,6 @@ export async function POST(request: Request): Promise<Response> {
 
   const systemPrompt = SYSTEM_PROMPTS[task];
 
-  // Build the user text: prefer explicit prompt, then context augmentation.
   let userText =
     prompt ??
     (task === "check_work"
@@ -32,47 +59,23 @@ export async function POST(request: Request): Promise<Response> {
     userText = `Problem / context:\n${context}\n\nStudent's work is shown in the image. ${userText}`;
   }
 
-  const stream = await openrouterClient.chat.send({
-    chatRequest: {
-      model: VISION_MODEL,
-      stream: true,
-      messages: [
-        {
-          role: "system" as const,
-          content: systemPrompt,
-        },
-        {
-          role: "user",
-          content: [
-            ...images.map((dataUrl) => ({
-              type: "image_url" as const,
-              imageUrl: { url: dataUrl },
-            })),
-            {
-              type: "text" as const,
-              text: userText,
-            },
-          ],
-        },
-      ],
-      maxCompletionTokens: 2048,
-    },
-    httpReferer: "https://stepwise.app",
-    appTitle: "Stepwise AI Tutor",
-  });
+  // Try each Gemini model in the fallback chain.
+  let lastError: unknown = null;
 
-  let analysis = "";
-  for await (const chunk of stream) {
-    const content = chunk.choices[0]?.delta.content;
-    if (content) analysis += content;
+  for (const model of VISION_MODELS) {
+    try {
+      const analysis = await runVision(model, systemPrompt, userText, images);
+      if (analysis) {
+        return Response.json({ analysis, task } satisfies VisionResponse);
+      }
+    } catch (err) {
+      lastError = err;
+      console.error(`[vision] model ${model} failed:`, err);
+    }
   }
 
-  if (!analysis) {
-    return Response.json(
-      { error: "Vision model returned an empty response" },
-      { status: 502 }
-    );
-  }
-
-  return Response.json({ analysis, task } satisfies VisionResponse);
+  return Response.json(
+    { error: "Vision analysis failed. Please try again in a moment." },
+    { status: 502 }
+  );
 }

@@ -1,12 +1,22 @@
-import { OpenRouter } from "@openrouter/sdk";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 
-if (!process.env.OPENROUTER_API_KEY) {
-  throw new Error("OPENROUTER_API_KEY environment variable is not set.");
+if (!process.env.GEMINI_API_KEY) {
+  throw new Error("GEMINI_API_KEY environment variable is not set.");
 }
 
-export const openrouterClient = new OpenRouter({
-  apiKey: process.env.OPENROUTER_API_KEY,
+/** Google Gemini provider used for multimodal (vision) analysis. */
+export const google = createGoogleGenerativeAI({
+  apiKey: process.env.GEMINI_API_KEY,
 });
 
-/** Free multimodal Gemma 4 model for vision analysis via OpenRouter */
-export const VISION_MODEL = "google/gemma-4-26b-a4b-it:free";
+/**
+ * Ordered list of Gemini vision models used for whiteboard analysis. The vision
+ * route tries them in order, falling through on failure/quota so a single
+ * throttled model doesn't break the feature.
+ */
+export const VISION_MODELS = [
+  "gemini-2.5-flash",
+] as const;
+
+/** Primary vision model (first in the fallback chain). */
+export const VISION_MODEL = VISION_MODELS[0];
