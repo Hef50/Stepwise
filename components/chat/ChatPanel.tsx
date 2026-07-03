@@ -24,9 +24,32 @@ interface ChatPanelProps {
   captureWhiteboard: () => Promise<CanvasPayload | null>;
 }
 
+async function analyzeVisualContext(
+  question: string,
+  images: string[]
+): Promise<string | null> {
+  if (images.length === 0) return null;
+
+  const res = await fetch("/api/vision", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt: `The student is asking: "${question}"
+
+Analyze the provided image(s) for an AI tutor. The first image is the current whiteboard when present; any remaining images are attachments. Identify the problem, notation, diagrams, equations, and relevant work shown. Do not solve the problem yet; provide concise visual context the tutor can use to answer the student's question.`,
+      images,
+    }),
+  });
+
+  if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
+  const data = (await res.json()) as { analysis?: string };
+  return data.analysis?.trim() || null;
+}
+
 export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<UploadedFile[]>([]);
+  const [isPreparingContext, setIsPreparingContext] = useState(false);
   const lastSpokenAssistantRef = useRef<string | null>(null);
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
 
@@ -37,27 +60,44 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
     messages: [],
   });
 
-  const isLoading = status === "streaming" || status === "submitted";
+  const isGenerating = status === "streaming" || status === "submitted";
+  const isLoading = isGenerating || isPreparingContext;
 
   const submitText = useCallback(
-    (text: string) => {
+    async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || isLoading) return;
 
-      const imageUrls = files
-        .filter((f) => f.type.startsWith("image/"))
-        .map((f) => f.dataUrl);
+      setIsPreparingContext(true);
 
-      const messageText =
-        imageUrls.length > 0
-          ? `${trimmed}\n\n[${imageUrls.length} image(s) attached — see vision context]`
-          : trimmed;
+      try {
+        const attachmentImages = files
+          .filter((f) => f.type.startsWith("image/"))
+          .map((f) => f.dataUrl);
 
-      sendMessage({ text: messageText });
-      setInput("");
-      setFiles([]);
+        const whiteboardPayload = await captureWhiteboard();
+        const imageUrls = whiteboardPayload?.imageDataUrl
+          ? [whiteboardPayload.imageDataUrl, ...attachmentImages]
+          : attachmentImages;
+
+        const visualContext = await analyzeVisualContext(trimmed, imageUrls);
+
+        sendMessage(
+          { text: trimmed },
+          visualContext ? { body: { visualContext } } : undefined
+        );
+        setInput("");
+        setFiles([]);
+      } catch (err) {
+        console.error("[ChatPanel] Visual context error:", err);
+        sendMessage({ text: trimmed });
+        setInput("");
+        setFiles([]);
+      } finally {
+        setIsPreparingContext(false);
+      }
     },
-    [files, isLoading, sendMessage]
+    [captureWhiteboard, files, isLoading, sendMessage]
   );
 
   const voice = useVoiceTA((transcript) => {
@@ -137,10 +177,10 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
       if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
       const data = (await res.json()) as { analysis: string };
 
-      // Inject the vision analysis as a user message context
-      sendMessage({
-        text: `[Whiteboard Analysis]\n${data.analysis}`,
-      });
+      sendMessage(
+        { text: "Please analyze the whiteboard." },
+        { body: { visualContext: data.analysis } }
+      );
     } catch (err) {
       console.error("[ChatPanel] Whiteboard vision error:", err);
     }

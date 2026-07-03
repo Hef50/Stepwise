@@ -31,14 +31,41 @@ function getLastUserText(messages: UIMessage[]): string {
     .trim();
 }
 
+function withVisualContext(messages: UIMessage[], visualContext?: string): UIMessage[] {
+  const context = visualContext?.trim();
+  if (!context) return messages;
+
+  const lastUserIndex = messages.findLastIndex((message) => message.role === "user");
+  if (lastUserIndex === -1) return messages;
+
+  return messages.map((message, index) => {
+    if (index !== lastUserIndex) return message;
+
+    return {
+      ...message,
+      parts: [
+        ...message.parts,
+        {
+          type: "text" as const,
+          text: `\n\n[Visual context from the student's current whiteboard and attachments]\n${context}`,
+        },
+      ],
+    };
+  });
+}
+
 export async function POST(request: Request) {
-  const body = (await request.json()) as { messages: UIMessage[] };
-  const { messages } = body;
+  const body = (await request.json()) as {
+    messages: UIMessage[];
+    visualContext?: string;
+  };
+  const { messages, visualContext } = body;
+  const modelMessages = withVisualContext(messages, visualContext);
 
   const hasModelKey = Boolean(process.env.LLM7_API_KEY);
 
   if (!hasModelKey) {
-    const promptText = getLastUserText(messages);
+    const promptText = getLastUserText(modelMessages);
     const fallbackText = promptText
       ? `I’m running in local demo mode because no AI API key is configured. Here’s a helpful tutor-style response to your question: ${promptText}. I can break the concept down step by step once a model key is connected.`
       : "I’m running in local demo mode because no AI API key is configured. Add an API key to enable richer tutor responses.";
@@ -58,7 +85,7 @@ export async function POST(request: Request) {
   const result = streamText({
     model: getLlm7TextModel(),
     system: SYSTEM_PROMPT,
-    messages: await convertToModelMessages(messages),
+    messages: await convertToModelMessages(modelMessages),
     maxOutputTokens: 4096,
   });
 

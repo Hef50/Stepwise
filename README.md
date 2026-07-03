@@ -21,7 +21,8 @@ npm install
 
 # 2. Configure environment variables
 cp .env.example .env.local
-# Fill in LLM7_API_KEY and GEMINI_API_KEY
+# Fill in LLM7_API_KEY and one vision key:
+# OPENROUTER_API_KEY, GEMINI_API_KEY, or GOOGLE_GENERATIVE_AI_API_KEY
 
 # 3. Run the dev server
 npm run dev
@@ -34,7 +35,8 @@ Open [http://localhost:3000](http://localhost:3000).
 | Variable | Description | Where to get |
 |---|---|---|
 | `LLM7_API_KEY` | LLM7 API token for text generation | [dash.llm7.io](https://dash.llm7.io) |
-| `GEMINI_API_KEY` | Google Gemini key for vision analysis | [aistudio.google.com](https://aistudio.google.com/apikey) |
+| `OPENROUTER_API_KEY` | Optional OpenRouter key for whiteboard vision | [openrouter.ai](https://openrouter.ai) |
+| `GEMINI_API_KEY` or `GOOGLE_GENERATIVE_AI_API_KEY` | Optional Google Gemini key for whiteboard vision | [aistudio.google.com](https://aistudio.google.com/apikey) |
 
 ## Architecture
 
