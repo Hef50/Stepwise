@@ -47,7 +47,7 @@ Open [http://localhost:3000](http://localhost:3000).
 | `GEMINI_API_KEY` | Live mode | Google Gemini key — **server-only**, never sent to browser | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
 
 > **Security reminder:** Never commit `.env.local`. Rotate any keys that may have been exposed. `GEMINI_API_KEY` is used only in server-side API routes.
-
+ 
 ## Architecture
 
 ```
