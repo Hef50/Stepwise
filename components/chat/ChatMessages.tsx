@@ -16,9 +16,35 @@ interface ChatMessagesProps {
 export function ChatMessages({ messages, isLoading, onDeleteMessage }: ChatMessagesProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  const lastMsg = messages[messages.length - 1];
+  const lastAssistantTextLen =
+    lastMsg?.role === "assistant"
+      ? lastMsg.parts
+          .filter((p) => p.type === "text")
+          .map((p) => (p.type === "text" ? p.text.length : 0))
+          .reduce((a, b) => a + b, 0)
+      : 0;
+  const awaitingFirstToken =
+    isLoading &&
+    (messages.length === 0 ||
+      lastMsg?.role === "user" ||
+      lastAssistantTextLen === 0);
+  const isStreaming =
+    isLoading && lastMsg?.role === "assistant" && lastAssistantTextLen > 0;
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
+    const viewport = bottomRef.current?.closest(
+      "[data-radix-scroll-area-viewport]"
+    );
+
+    if (viewport instanceof HTMLElement) {
+      if (isStreaming) {
+        viewport.scrollTop = viewport.scrollHeight;
+      } else {
+        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      }
+    }
+  }, [messages, isLoading, isStreaming]);
 
   if (messages.length === 0 && !isLoading) {
     return (
@@ -48,7 +74,7 @@ export function ChatMessages({ messages, isLoading, onDeleteMessage }: ChatMessa
           />
         ))}
 
-        {isLoading && (
+        {awaitingFirstToken && (
           <div className="flex gap-3 px-1">
             <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-secondary text-secondary-foreground">
               <Bot className="h-4 w-4" />
