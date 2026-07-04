@@ -11,15 +11,19 @@ import { Button } from "@/components/ui/button";
 interface MessageBubbleProps {
   message: UIMessage;
   onDelete: (id: string) => void;
+  /** When set, overrides the message text (e.g. throttled stream reveal). */
+  textOverride?: string;
 }
 
-export function MessageBubble({ message, onDelete }: MessageBubbleProps) {
+export function MessageBubble({ message, onDelete, textOverride }: MessageBubbleProps) {
   const isUser = message.role === "user";
 
-  const textContent = message.parts
-    .filter((p) => p.type === "text")
-    .map((p) => (p.type === "text" ? p.text : ""))
-    .join("");
+  const textContent =
+    textOverride ??
+    message.parts
+      .filter((p) => p.type === "text")
+      .map((p) => (p.type === "text" ? p.text : ""))
+      .join("");
 
   const imageParts = message.parts.filter(
     (p): p is Extract<typeof p, { type: "file" }> => p.type === "file"

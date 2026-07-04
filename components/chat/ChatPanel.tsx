@@ -15,6 +15,8 @@ import { Separator } from "@/components/ui/separator";
 import { ChatMessages } from "./ChatMessages";
 import { ChatInput } from "./ChatInput";
 import { CourseMaterialsBar } from "./CourseMaterialsBar";
+import { TextSpeedSlider } from "./TextSpeedSlider";
+import { loadTextSpeed, saveTextSpeed } from "@/lib/chat/textReveal";
 import { useVoiceTA } from "@/hooks/useVoiceTA";
 import { useChatPersistence } from "@/hooks/useChatPersistence";
 import { useCourseMaterials, toMessageAttachment } from "@/hooks/useCourseMaterials";
@@ -51,6 +53,7 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
   const [escalated, setEscalated] = useState(false);
   /** True if the user manually downgraded from Gemma to LLM7 to escape a rate limit */
   const [manuallyDowngraded, setManuallyDowngraded] = useState(false);
+  const [textSpeed, setTextSpeed] = useState(loadTextSpeed);
   const voice = useVoiceTA();
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
   const courseMaterials = useCourseMaterials();
@@ -61,6 +64,11 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
   useEffect(() => {
     onActiveModelChange?.(escalated ? "gemma" : "llm7");
   }, [escalated, onActiveModelChange]);
+
+  const handleTextSpeedChange = useCallback((speed: number) => {
+    setTextSpeed(speed);
+    saveTextSpeed(speed);
+  }, []);
 
   const { messages, sendMessage, setMessages, status, stop, error } = useChat<StepwiseUIMessage>({
     transport: new DefaultChatTransport({ api: "/api/chat" }),
@@ -205,7 +213,9 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
               {provider === "gemma" ? "Gemma 4 · Vision enabled" : "AI Tutor"}
             </p>
           </div>
-          <Tooltip>
+          <div className="flex items-center gap-1">
+            <TextSpeedSlider value={textSpeed} onChange={handleTextSpeedChange} />
+            <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 type="button"
@@ -219,6 +229,7 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
             </TooltipTrigger>
             <TooltipContent>Clear chat history</TooltipContent>
           </Tooltip>
+          </div>
         </div>
 
         <Separator />
@@ -228,6 +239,7 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
           messages={messages}
           isLoading={isLoading}
           onDeleteMessage={handleDeleteMessage}
+          textSpeed={textSpeed}
         />
 
         {/* Rate limit error banner */}

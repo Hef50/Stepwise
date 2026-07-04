@@ -1,36 +1,75 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { UIMessage } from "ai";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageBubble } from "./MessageBubble";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Bot } from "lucide-react";
+import { useTextReveal } from "@/hooks/useTextReveal";
+import { speedToCharsPerSecond } from "@/lib/chat/textReveal";
 
 interface ChatMessagesProps {
   messages: UIMessage[];
   isLoading: boolean;
   onDeleteMessage: (id: string) => void;
+  textSpeed: number;
 }
 
-export function ChatMessages({ messages, isLoading, onDeleteMessage }: ChatMessagesProps) {
+function getAssistantText(message: UIMessage): string {
+  return message.parts
+    .filter((p) => p.type === "text")
+    .map((p) => (p.type === "text" ? p.text : ""))
+    .join("");
+}
+
+export function ChatMessages({
+  messages,
+  isLoading,
+  onDeleteMessage,
+  textSpeed,
+}: ChatMessagesProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(
+    null
+  );
+  const charsPerSecond = speedToCharsPerSecond(textSpeed);
 
   const lastMsg = messages[messages.length - 1];
-  const lastAssistantTextLen =
-    lastMsg?.role === "assistant"
-      ? lastMsg.parts
-          .filter((p) => p.type === "text")
-          .map((p) => (p.type === "text" ? p.text.length : 0))
-          .reduce((a, b) => a + b, 0)
-      : 0;
+
+  if (
+    isLoading &&
+    lastMsg?.role === "assistant" &&
+    streamingMessageId !== lastMsg.id
+  ) {
+    setStreamingMessageId(lastMsg.id);
+  }
+
+  const isLiveAssistant =
+    lastMsg?.role === "assistant" && streamingMessageId === lastMsg.id;
+
+  const lastAssistantFullText =
+    lastMsg?.role === "assistant" ? getAssistantText(lastMsg) : "";
+  const lastDisplayedText = useTextReveal(
+    lastAssistantFullText,
+    isLiveAssistant ? charsPerSecond : null,
+    isLiveAssistant ? lastMsg.id : undefined
+  );
+
+  const lastAssistantTextLen = lastAssistantFullText.length;
+  const lastDisplayedLen = lastDisplayedText.length;
   const awaitingFirstToken =
     isLoading &&
     (messages.length === 0 ||
       lastMsg?.role === "user" ||
       lastAssistantTextLen === 0);
   const isStreaming =
-    isLoading && lastMsg?.role === "assistant" && lastAssistantTextLen > 0;
+    isLoading && lastMsg?.role === "assistant" && lastDisplayedLen > 0;
+  const isCatchingUp =
+    !isLoading &&
+    lastMsg?.role === "assistant" &&
+    charsPerSecond !== null &&
+    lastDisplayedLen < lastAssistantTextLen;
 
   useEffect(() => {
     const viewport = bottomRef.current?.closest(
@@ -38,13 +77,13 @@ export function ChatMessages({ messages, isLoading, onDeleteMessage }: ChatMessa
     );
 
     if (viewport instanceof HTMLElement) {
-      if (isStreaming) {
+      if (isStreaming || isCatchingUp) {
         viewport.scrollTop = viewport.scrollHeight;
       } else {
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
       }
     }
-  }, [messages, isLoading, isStreaming]);
+  }, [messages, isLoading, isStreaming, isCatchingUp, lastDisplayedLen]);
 
   if (messages.length === 0 && !isLoading) {
     return (
@@ -66,11 +105,16 @@ export function ChatMessages({ messages, isLoading, onDeleteMessage }: ChatMessa
   return (
     <ScrollArea className="flex-1 px-3">
       <div className="space-y-4 py-4">
-        {messages.map((message) => (
+        {messages.map((message, index) => (
           <MessageBubble
             key={message.id}
             message={message}
             onDelete={onDeleteMessage}
+            textOverride={
+              index === messages.length - 1 && message.role === "assistant"
+                ? lastDisplayedText
+                : undefined
+            }
           />
         ))}
 
