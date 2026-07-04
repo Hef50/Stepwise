@@ -22,7 +22,11 @@ import type {
   MaterialExtractResponse,
   ActiveModel,
   ChatProvider,
+  MessagePdfAttachment,
+  StepwiseMessageMetadata,
 } from "@/lib/types";
+
+type StepwiseUIMessage = UIMessage<StepwiseMessageMetadata>;
 
 interface ChatPanelProps {
   captureWhiteboard: () => Promise<CanvasPayload | null>;
@@ -57,7 +61,7 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
     onActiveModelChange?.(escalated ? "gemma" : "llm7");
   }, [escalated, onActiveModelChange]);
 
-  const { messages, sendMessage, setMessages, status, stop, error } = useChat({
+  const { messages, sendMessage, setMessages, status, stop, error } = useChat<StepwiseUIMessage>({
     transport: new DefaultChatTransport({ api: "/api/chat" }),
     messages: [],
   });
@@ -69,11 +73,13 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
   useEffect(() => {
     const persisted = loadMessages();
     if (persisted.length > 0) {
-      const uiMessages: UIMessage[] = persisted.map((m) => ({
+      const uiMessages: StepwiseUIMessage[] = persisted.map((m) => ({
         id: m.id,
         role: m.role,
         parts: [{ type: "text" as const, text: m.content }],
-        metadata: undefined,
+        metadata: m.attachments?.length
+          ? { attachments: m.attachments }
+          : undefined,
       }));
       setMessages(uiMessages);
     }
@@ -117,8 +123,8 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
         parts.push({ type: "file", mediaType: img.type, url: img.dataUrl });
       }
 
-      // Extract text from PDFs (text extraction, not vision — no escalation)
-      const pdfContextLines: string[] = [];
+      // Extract text from PDFs — stored in metadata for UI; injected server-side for the model
+      const pdfAttachments: MessagePdfAttachment[] = [];
       if (pdfFiles.length > 0) {
         setIsProcessingFiles(true);
         try {
@@ -131,13 +137,12 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
               });
               if (res.ok) {
                 const data = (await res.json()) as MaterialExtractResponse;
-                const truncated =
-                  data.text.length > 8000
-                    ? data.text.slice(0, 8000) + "\n…[truncated]"
-                    : data.text;
-                pdfContextLines.push(
-                  `[Attached PDF: ${data.name} (${data.pageCount} page${data.pageCount !== 1 ? "s" : ""})]\n${truncated}`
-                );
+                pdfAttachments.push({
+                  id: pdf.id,
+                  name: data.name,
+                  pageCount: data.pageCount,
+                  text: data.text,
+                });
               }
             } catch {
               // Non-fatal: skip this PDF silently
@@ -148,14 +153,15 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
         }
       }
 
-      const messageText =
-        pdfContextLines.length > 0
-          ? `${pdfContextLines.join("\n\n")}\n\n${trimmed}`
-          : trimmed;
+      parts.push({ type: "text", text: trimmed });
 
-      parts.push({ type: "text", text: messageText });
+      const metadata: StepwiseMessageMetadata | undefined =
+        pdfAttachments.length > 0 ? { attachments: pdfAttachments } : undefined;
 
-      sendMessage({ parts }, { body: { provider: effectiveProvider } });
+      sendMessage(
+        { parts, metadata },
+        { body: { provider: effectiveProvider } }
+      );
       setInput("");
       setFiles([]);
     },

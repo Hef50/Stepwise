@@ -6,7 +6,9 @@ import {
   LocalStorageChatStore,
   type ChatStore,
 } from "@/lib/persistence/chatStore";
-import type { ChatSession, SerializedMessage } from "@/lib/types";
+import type { ChatSession, SerializedMessage, StepwiseMessageMetadata } from "@/lib/types";
+
+type StepwiseUIMessage = UIMessage<StepwiseMessageMetadata>;
 
 const DEFAULT_SESSION_ID = "default";
 const SAVE_DEBOUNCE_MS = 800;
@@ -18,7 +20,7 @@ interface UseChatPersistenceOptions {
 
 interface UseChatPersistenceReturn {
   loadMessages: () => SerializedMessage[];
-  saveMessages: (messages: UIMessage[]) => void;
+  saveMessages: (messages: StepwiseUIMessage[]) => void;
   clearSession: () => void;
 }
 
@@ -50,17 +52,19 @@ export function useChatPersistence(
   }, [sessionId]);
 
   const saveMessages = useCallback(
-    (messages: UIMessage[]) => {
+    (messages: StepwiseUIMessage[]) => {
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
 
       debounceTimerRef.current = setTimeout(() => {
         const serialized: SerializedMessage[] = messages.map((m) => {
           const textPart = m.parts.find((p) => p.type === "text");
           const content = textPart?.type === "text" ? textPart.text : "";
+          const attachments = m.metadata?.attachments;
           return {
             id: m.id,
             role: m.role as SerializedMessage["role"],
             content,
+            attachments: attachments?.length ? attachments : undefined,
             createdAt: new Date().toISOString(),
           };
         });

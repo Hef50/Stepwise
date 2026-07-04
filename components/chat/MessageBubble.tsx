@@ -3,7 +3,9 @@
 import type { UIMessage } from "ai";
 import { Bot, User, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { getPdfAttachments } from "@/lib/chat/pdfAttachments";
 import { MessageRenderer } from "@/components/diagrams/MessageRenderer";
+import { MessagePdfAttachments } from "@/components/chat/MessagePdfAttachments";
 import { Button } from "@/components/ui/button";
 
 interface MessageBubbleProps {
@@ -22,6 +24,8 @@ export function MessageBubble({ message, onDelete }: MessageBubbleProps) {
   const imageParts = message.parts.filter(
     (p): p is Extract<typeof p, { type: "file" }> => p.type === "file"
   );
+
+  const pdfAttachments = isUser ? getPdfAttachments(message.metadata) : [];
 
   return (
     <div
@@ -71,8 +75,18 @@ export function MessageBubble({ message, onDelete }: MessageBubbleProps) {
             </div>
           )}
 
+          {/* PDF attachment chips */}
+          {isUser && pdfAttachments.length > 0 && (
+            <MessagePdfAttachments
+              attachments={pdfAttachments}
+              onPrimaryBackground
+            />
+          )}
+
           {isUser ? (
-            <p className="whitespace-pre-wrap leading-relaxed">{textContent}</p>
+            textContent ? (
+              <p className="whitespace-pre-wrap leading-relaxed">{textContent}</p>
+            ) : null
           ) : (
             <MessageRenderer content={textContent} />
           )}

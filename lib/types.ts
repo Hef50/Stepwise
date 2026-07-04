@@ -37,10 +37,23 @@ export interface CanvasPayload {
 
 // ─── Chat / Persistence ───────────────────────────────────────────────────────
 
+export interface MessagePdfAttachment {
+  id: string;
+  name: string;
+  pageCount: number;
+  /** Full extracted text — shown in the attachment viewer, not in the chat bubble */
+  text: string;
+}
+
+export interface StepwiseMessageMetadata {
+  attachments?: MessagePdfAttachment[];
+}
+
 export interface SerializedMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  attachments?: MessagePdfAttachment[];
   createdAt?: string;
 }
 

@@ -1,6 +1,7 @@
 import { streamText, convertToModelMessages, APICallError, type UIMessage } from "ai";
 import { llm7TextModel } from "@/lib/ai/llm7";
 import { openrouterGemma } from "@/lib/ai/openrouter";
+import { enrichMessagesWithPdfContext } from "@/lib/chat/pdfAttachments";
 import type { ChatProvider } from "@/lib/types";
 
 const SYSTEM_PROMPT = `You are Stepwise, an expert AI tutor. You help students learn by breaking down complex concepts into clear, step-by-step explanations.
@@ -28,10 +29,14 @@ export async function POST(request: Request) {
   const model = provider === "gemma" ? openrouterGemma : llm7TextModel;
 
   try {
+    const modelMessages = await convertToModelMessages(
+      enrichMessagesWithPdfContext(messages)
+    );
+
     const result = streamText({
       model,
       system: SYSTEM_PROMPT,
-      messages: await convertToModelMessages(messages),
+      messages: modelMessages,
       maxOutputTokens: 4096,
     });
 
