@@ -35,6 +35,28 @@ export interface CanvasPayload {
   capturedAt: string;
 }
 
+/** A single resolved SVG path element extracted from MathJax SVG output */
+export interface SvgPathData {
+  /** The `d` attribute of the path element */
+  d: string;
+  /** Optional `transform` attribute (translate/scale from MathJax layout) */
+  transform?: string;
+}
+
+/** Props for the animated LaTeX custom tldraw shape */
+export interface LatexAnimatedShapeProps {
+  /** Original LaTeX string, stored for serialization and re-render */
+  latex: string;
+  /** Flat array of resolved SVG path elements to animate */
+  svgPaths: SvgPathData[];
+  /** viewBox string from the MathJax SVG output (e.g. "0 0 652 182") */
+  viewBox: string;
+  /** Shape width in canvas units */
+  w: number;
+  /** Shape height in canvas units */
+  h: number;
+}
+
 // ─── Chat / Persistence ───────────────────────────────────────────────────────
 
 export interface MessagePdfAttachment {

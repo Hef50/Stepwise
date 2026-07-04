@@ -18,14 +18,20 @@ interface MessageBubbleProps {
 export function MessageBubble({ message, onDelete, textOverride }: MessageBubbleProps) {
   const isUser = message.role === "user";
 
+  // Exclude tool invocations that are silently routed to the canvas —
+  // these must never surface in the chat UI regardless of their state.
+  const visibleParts = message.parts.filter(
+    (p) => p.type !== "tool-render_math_whiteboard"
+  );
+
   const textContent =
     textOverride ??
-    message.parts
+    visibleParts
       .filter((p) => p.type === "text")
       .map((p) => (p.type === "text" ? p.text : ""))
       .join("");
 
-  const imageParts = message.parts.filter(
+  const imageParts = visibleParts.filter(
     (p): p is Extract<typeof p, { type: "file" }> => p.type === "file"
   );
 

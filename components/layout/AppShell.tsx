@@ -8,6 +8,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { WhiteboardPanel } from "@/components/whiteboard/WhiteboardPanel";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWhiteboardCapture } from "@/hooks/useWhiteboardCapture";
+import { useWhiteboardMath } from "@/hooks/useWhiteboardMath";
 import { ModelStatusBadge } from "./ModelStatusBadge";
 import type { AppMode, ActiveModel } from "@/lib/types";
 
@@ -50,6 +51,7 @@ const MODE_STORAGE_KEY = "stepwise_mode";
 
 export function AppShell() {
   const { editorRef, capture } = useWhiteboardCapture();
+  const { renderLatex } = useWhiteboardMath(editorRef);
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH);
   const [mode, setMode] = useState<AppMode>("text");
   const [activeModel, setActiveModel] = useState<ActiveModel>("llm7");
@@ -139,6 +141,7 @@ export function AppShell() {
     ) : (
       <ChatPanel
         captureWhiteboard={capture}
+        renderLatexOnCanvas={renderLatex}
         onActiveModelChange={setActiveModel}
       />
     );

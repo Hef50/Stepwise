@@ -33,6 +33,8 @@ type StepwiseUIMessage = UIMessage<StepwiseMessageMetadata>;
 
 interface ChatPanelProps {
   captureWhiteboard: () => Promise<CanvasPayload | null>;
+  /** Routes a LaTeX string to the tldraw canvas as an animated shape */
+  renderLatexOnCanvas?: (latex: string, displayMode?: boolean) => Promise<void>;
   onActiveModelChange?: (model: ActiveModel) => void;
 }
 
@@ -46,7 +48,11 @@ function isRateLimitError(error: Error | null | undefined): boolean {
   );
 }
 
-export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelProps) {
+export function ChatPanel({
+  captureWhiteboard,
+  renderLatexOnCanvas,
+  onActiveModelChange,
+}: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<UploadedFile[]>([]);
   /** Once true, all subsequent messages in this session use Gemma via OpenRouter */
@@ -70,10 +76,34 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
     saveTextSpeed(speed);
   }, []);
 
-  const { messages, sendMessage, setMessages, status, stop, error } = useChat<StepwiseUIMessage>({
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
-    messages: [],
-  });
+  const { messages, sendMessage, setMessages, status, stop, error, addToolOutput } =
+    useChat<StepwiseUIMessage>({
+      transport: new DefaultChatTransport({ api: "/api/chat" }),
+      messages: [],
+
+      async onToolCall({ toolCall }) {
+        // Guard required by AI SDK: dynamic tools must be handled separately
+        if (toolCall.dynamic) return;
+
+        if (toolCall.toolName === "render_math_whiteboard") {
+          // Route the LaTeX to the canvas — fire and forget
+          if (renderLatexOnCanvas) {
+            const { latex, displayMode } = toolCall.input as {
+              latex: string;
+              displayMode?: boolean;
+            };
+            void renderLatexOnCanvas(latex, displayMode);
+          }
+
+          // Acknowledge the tool call immediately so the AI stream can continue
+          addToolOutput({
+            tool: "render_math_whiteboard",
+            toolCallId: toolCall.toolCallId,
+            output: { rendered: true },
+          });
+        }
+      },
+    });
 
   const isLoading =
     status === "streaming" ||
