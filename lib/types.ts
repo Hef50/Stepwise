@@ -1,3 +1,29 @@
+// ─── App Mode ────────────────────────────────────────────────────────────────
+
+export type AppMode = "text" | "voice";
+
+export type ChatProvider = "llm7" | "gemma";
+
+export type ActiveModel = "llm7" | "gemma" | "gemini-live";
+
+// ─── Chat API ────────────────────────────────────────────────────────────────
+
+export interface ChatRequestBody {
+  messages: unknown[];
+  provider: ChatProvider;
+}
+
+// ─── Live Session ─────────────────────────────────────────────────────────────
+
+export type LiveStatus = "idle" | "connecting" | "active" | "speaking" | "error";
+
+export interface LiveTranscriptLine {
+  id: string;
+  role: "user" | "model";
+  text: string;
+  partial: boolean;
+}
+
 // ─── Canvas / Whiteboard ─────────────────────────────────────────────────────
 
 export interface CanvasPayload {
@@ -69,17 +95,6 @@ export interface UploadedFile {
   /** base-64 data URL */
   dataUrl: string;
   size: number;
-}
-
-// ─── Vision API ───────────────────────────────────────────────────────────────
-
-export interface VisionRequest {
-  prompt: string;
-  images: string[];
-}
-
-export interface VisionResponse {
-  analysis: string;
 }
 
 // ─── Materials Extract API ────────────────────────────────────────────────────

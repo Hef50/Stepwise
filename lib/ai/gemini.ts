@@ -1,12 +1,6 @@
-import { OpenRouter } from "@openrouter/sdk";
+/** Gemini model configuration for Voice-first (Live API) mode */
 
-if (!process.env.OPENROUTER_API_KEY) {
-  throw new Error("OPENROUTER_API_KEY environment variable is not set.");
-}
+export const GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview";
 
-export const openrouterClient = new OpenRouter({
-  apiKey: process.env.OPENROUTER_API_KEY,
-});
-
-/** Free multimodal Gemma 4 model for vision analysis via OpenRouter */
-export const VISION_MODEL = "google/gemma-4-26b-a4b-it:free";
+/** Token lifetime for ephemeral Live API tokens (in seconds) */
+export const GEMINI_LIVE_TOKEN_TTL_SECONDS = 300;

@@ -1,29 +1,38 @@
-# Stepwise — AI Tutor MVP
- 
-A responsive AI tutoring web app with a streaming chat interface, interactive tldraw whiteboard, voice input/output, and diagram rendering.
+# Stepwise — AI Tutor
+
+A responsive AI tutoring web app with a streaming chat interface, interactive tldraw whiteboard, and two tutoring modes.
+
+## Modes
+
+### Text Mode (default)
+- Chat powered by **LLM7** (free, fast, text-only) via OpenRouter-compatible API
+- Attach images or capture the whiteboard → automatically escalates to **Gemma 4** (multimodal via OpenRouter) for the rest of the session
+- Status badge shows active model: **LLM7** / **Gemma 4**
+- Mermaid & Schemdraw diagram rendering; PDF text extraction; file uploads
+
+### Live Mode ("Office Hours")
+- Real-time **voice tutoring** via Gemini 3 Flash Live API
+- Native audio input (mic PCM 16kHz via AudioWorklet) + audio output (PCM 24kHz)
+- Whiteboard streamed to the tutor at ~1 FPS so Gemini can see what you draw
+- On-screen transcription of both student and tutor speech
+- Status badge shows **Gemini 3 Live**
 
 ## Features
 
-- **Split layout** — side-by-side chat + whiteboard on tablets/laptops; tabbed on mobile
-- **Streaming AI chat** — powered by LLM7 (OpenAI-compatible) via Vercel AI SDK v5
-- **Vision analysis** — capture the whiteboard and send it to Gemini for analysis
-- **Mermaid diagrams** — flowcharts and diagrams rendered inline from AI responses
-- **Schemdraw diagrams** — circuit/physics diagram code displayed with an elegant placeholder
-- **Voice interface** — Web Speech API for free, fully local STT + TTS
-- **File upload** — attach images and PDFs to the AI context
-- **LocalStorage persistence** — chat history survives page refresh
+- **Split layout** — resizable side-by-side on desktop; tabbed on mobile
+- **Mode toggle** — persisted in `localStorage`, separate per tab
+- **Model escalation** — text-only → multimodal as soon as any image is attached (sticky per session)
+- **Ephemeral tokens** — `GEMINI_API_KEY` never reaches the browser; server mints short-lived tokens for Live sessions
+- **Mermaid diagrams** — flowcharts rendered inline from AI responses
+- **Schemdraw diagrams** — circuit/physics diagram placeholder
+- **Voice interface (text mode)** — Web Speech API for local STT + TTS
+- **LocalStorage persistence** — text-mode chat history survives refresh
 
-## Quick Start  
+## Quick Start
 
 ```bash
-# 1. Clone and install
 npm install
-
-# 2. Configure environment variables
-cp .env.example .env.local
-# Fill in LLM7_API_KEY and GEMINI_API_KEY
-
-# 3. Run the dev server
+cp .env.example .env.local   # fill in the keys below
 npm run dev
 ```
 
@@ -31,53 +40,47 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Environment Variables
 
-| Variable | Description | Where to get |
-|---|---|---|
-| `LLM7_API_KEY` | LLM7 API token for text generation | [dash.llm7.io](https://dash.llm7.io) |
-| `GEMINI_API_KEY` | Google Gemini key for vision analysis | [aistudio.google.com](https://aistudio.google.com/apikey) |
+| Variable | Required for | Description | Where to get |
+|---|---|---|---|
+| `LLM7_API_KEY` | Text mode | Token for LLM7 (text-only default) | [dash.llm7.io](https://dash.llm7.io) |
+| `OPENROUTER_API_KEY` | Text mode (vision) | Key for Gemma 4 multimodal via OpenRouter | [openrouter.ai/keys](https://openrouter.ai/keys) |
+| `GEMINI_API_KEY` | Live mode | Google Gemini key — **server-only**, never sent to browser | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
+
+> **Security reminder:** Never commit `.env.local`. Rotate any keys that may have been exposed. `GEMINI_API_KEY` is used only in server-side API routes.
 
 ## Architecture
 
 ```
 app/
   api/
-    chat/route.ts       ← LLM7 streaming text endpoint (server-only)
-    vision/route.ts     ← Gemini vision endpoint (server-only)
-  layout.tsx
-  page.tsx
+    chat/route.ts           ← Streaming chat (LLM7 or Gemma, selected by provider param)
+    materials/extract/      ← PDF text extraction (pdf-parse, server-only)
+    live/token/route.ts     ← Mints ephemeral Gemini Live tokens (GEMINI_API_KEY server-only)
+  layout.tsx / page.tsx
 components/
-  layout/AppShell.tsx   ← Responsive split/tabbed layout
-  chat/                 ← Chat UI components
-  whiteboard/           ← tldraw integration
-  diagrams/             ← Mermaid + Schemdraw renderers
-  common/               ← ErrorBoundary
+  layout/
+    AppShell.tsx            ← Mode toggle, model badge, resizable split / mobile tabs
+    ModelStatusBadge.tsx    ← Shows LLM7 / Gemma 4 / Gemini 3 Live
+  chat/
+    ChatPanel.tsx           ← Text-mode chat (LLM7 → Gemma escalation)
+    LiveTutorPanel.tsx      ← Voice-mode live session UI
+    ChatInput.tsx / ChatMessages.tsx / MessageBubble.tsx
+  whiteboard/               ← tldraw integration (shared across both modes)
+  diagrams/                 ← Mermaid + Schemdraw renderers
+  common/ErrorBoundary.tsx
 hooks/
-  useVoiceTA.ts         ← Web Speech API voice hook
-  useChatPersistence.ts ← LocalStorage chat persistence
-  useWhiteboardCapture.ts ← Canvas export utility
+  useGeminiLive.ts          ← Gemini Live session: connect/mic/audio/whiteboard/transcript
+  useVoiceTA.ts             ← Web Speech API voice hook (text mode)
+  useChatPersistence.ts     ← LocalStorage chat persistence
+  useWhiteboardCapture.ts   ← Canvas export utility
 lib/
-  ai/llm7.ts            ← LLM7 provider (server-only)
-  ai/gemini.ts          ← Gemini provider (server-only)
-  persistence/          ← ChatStore interface + LocalStorage impl
-  whiteboard/           ← Canvas capture utilities
-  markdown/             ← Message block parser
-  types.ts              ← Shared TypeScript types
+  ai/llm7.ts                ← LLM7 provider (server-only)
+  ai/openrouter.ts          ← OpenRouter Gemma provider (server-only)
+  ai/gemini.ts              ← Gemini Live model constants
+  types.ts                  ← Shared TypeScript types
+public/
+  worklets/mic-processor.js ← AudioWorklet: Float32 → PCM16 conversion for mic
 ```
-
-## Swap Points (future upgrades)
-
-### Replace LocalStorage with Supabase
-1. Implement the `ChatStore` interface in `lib/persistence/supabaseChatStore.ts`
-2. In `hooks/useChatPersistence.ts`, pass a `SupabaseChatStore` instance via the `store` option
-
-### Replace Web Speech API with OpenAI Whisper + TTS
-1. Create `hooks/useVoiceOpenAI.ts` that implements and returns `VoiceControls`
-2. In `components/chat/ChatPanel.tsx`, replace `useVoiceTA` import with `useVoiceOpenAI`
-3. No other component changes required — the interface is identical
-
-### Replace LLM7 with another provider
-1. Edit `lib/ai/llm7.ts` to use any Vercel AI SDK provider
-2. Update `app/api/chat/route.ts` to use the new model
 
 ## Tech Stack
 
@@ -85,7 +88,9 @@ lib/
 - [Tailwind CSS v4](https://tailwindcss.com)
 - [shadcn/ui](https://ui.shadcn.com) (Radix primitives)
 - [@tldraw/tldraw](https://tldraw.dev) (interactive canvas)
-- [Vercel AI SDK v5](https://ai-sdk.dev)
-- [Mermaid.js](https://mermaid.js.org) (diagram rendering)
-- [LLM7.io](https://llm7.io) (free OpenAI-compatible LLM API)
-- [Google Gemini](https://aistudio.google.com) (vision analysis)
+- [Vercel AI SDK v5](https://ai-sdk.dev) + `@ai-sdk/openai-compatible`
+- [@google/genai](https://github.com/googleapis/js-genai) (Gemini Live API)
+- [Mermaid.js](https://mermaid.js.org)
+- [LLM7.io](https://llm7.io) — free text-only LLM
+- [OpenRouter](https://openrouter.ai) — Gemma 4 multimodal
+- [Google Gemini 3 Flash Live](https://ai.google.dev/gemini-api/docs/live) — real-time voice
