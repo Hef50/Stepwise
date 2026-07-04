@@ -81,3 +81,17 @@ export interface VisionRequest {
 export interface VisionResponse {
   analysis: string;
 }
+
+// ─── Materials Extract API ────────────────────────────────────────────────────
+
+export interface MaterialExtractRequest {
+  /** base-64 PDF data URL */
+  dataUrl: string;
+  name: string;
+}
+
+export interface MaterialExtractResponse {
+  text: string;
+  pageCount: number;
+  name: string;
+}

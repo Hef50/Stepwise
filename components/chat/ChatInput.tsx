@@ -16,7 +16,7 @@ import type { VoiceControls as VoiceControlsType, UploadedFile } from "@/lib/typ
 interface ChatInputProps {
   value: string;
   onChange: (value: string) => void;
-  onSubmit: (e: FormEvent<HTMLFormElement>) => void;
+  onSubmit: (e: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onStop: () => void;
   isLoading: boolean;
   voice: VoiceControlsType;
