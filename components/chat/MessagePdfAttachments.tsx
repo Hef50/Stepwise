@@ -2,13 +2,7 @@
 
 import { useState } from "react";
 import { FileText } from "lucide-react";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { PdfTextViewer } from "@/components/chat/PdfTextViewer";
 import type { MessagePdfAttachment } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -61,23 +55,15 @@ export function MessagePdfAttachments({
         ))}
       </div>
 
-      <Dialog open={viewing !== null} onOpenChange={(open) => !open && setViewing(null)}>
-        <DialogContent className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
-          <DialogHeader className="flex-shrink-0 px-6 pt-6 pb-4">
-            <DialogTitle className="truncate pr-8">{viewing?.name}</DialogTitle>
-            <DialogDescription>
-              {viewing
-                ? `${viewing.pageCount} ${viewing.pageCount === 1 ? "page" : "pages"} · extracted text`
-                : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-y-auto border-t border-border px-6 py-4">
-            <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-foreground">
-              {viewing?.text}
-            </pre>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {viewing && (
+        <PdfTextViewer
+          name={viewing.name}
+          pageCount={viewing.pageCount}
+          text={viewing.text}
+          open={viewing !== null}
+          onOpenChange={(open) => !open && setViewing(null)}
+        />
+      )}
     </>
   );
 }

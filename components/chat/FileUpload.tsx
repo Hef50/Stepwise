@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Paperclip, X, FileImage, FileText, Upload } from "lucide-react";
+import { Paperclip, X, FileImage, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,7 +12,6 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import type { UploadedFile } from "@/lib/types";
 
 interface FileUploadProps {
@@ -20,7 +19,7 @@ interface FileUploadProps {
   onFilesChange: (files: UploadedFile[]) => void;
 }
 
-const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
+const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const MAX_SIZE_MB = 10;
 const MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024;
 
@@ -31,11 +30,6 @@ function fileToDataUrl(file: File): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
-}
-
-function FileIcon({ type }: { type: string }) {
-  if (type.startsWith("image/")) return <FileImage className="h-4 w-4 text-blue-500" />;
-  return <FileText className="h-4 w-4 text-orange-500" />;
 }
 
 export function FileUpload({ files, onFilesChange }: FileUploadProps) {
@@ -84,8 +78,8 @@ export function FileUpload({ files, onFilesChange }: FileUploadProps) {
         variant="ghost"
         size="icon"
         onClick={() => setOpen(true)}
-        className="relative"
-        aria-label="Attach files"
+        className="relative h-11 w-11 flex-shrink-0"
+        aria-label="Attach images"
       >
         <Paperclip className="h-5 w-5" />
         {files.length > 0 && (
@@ -98,26 +92,25 @@ export function FileUpload({ files, onFilesChange }: FileUploadProps) {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Attach Course Materials</DialogTitle>
+            <DialogTitle>Attach images</DialogTitle>
             <DialogDescription>
-              Upload images or PDFs to include in the AI context. Supported: JPG,
-              PNG, WEBP, PDF (max {MAX_SIZE_MB}MB each).
+              Add images to this message for AI vision analysis. For PDFs (syllabus, lectures),
+              use Course materials below the chat.
             </DialogDescription>
           </DialogHeader>
 
-          {/* Upload area */}
           <div
             className="cursor-pointer rounded-xl border-2 border-dashed border-border bg-muted/30 p-8 text-center transition-colors hover:border-primary hover:bg-primary/5"
             onClick={() => inputRef.current?.click()}
             onKeyDown={(e) => e.key === "Enter" && inputRef.current?.click()}
             role="button"
             tabIndex={0}
-            aria-label="Click to select files"
+            aria-label="Click to select images"
           >
             <Upload className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
-            <p className="text-sm font-medium">Click to select files</p>
+            <p className="text-sm font-medium">Click to select images</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              JPG, PNG, WEBP, PDF up to {MAX_SIZE_MB}MB
+              JPG, PNG, WEBP up to {MAX_SIZE_MB}MB
             </p>
             <input
               ref={inputRef}
@@ -129,40 +122,35 @@ export function FileUpload({ files, onFilesChange }: FileUploadProps) {
             />
           </div>
 
-          {error && (
-            <p className="text-sm text-destructive">{error}</p>
-          )}
+          {error && <p className="text-sm text-destructive">{error}</p>}
 
-          {/* File list */}
           {files.length > 0 && (
-            <ScrollArea className="max-h-52">
-              <div className="space-y-2">
-                {files.map((file) => (
-                  <div
-                    key={file.id}
-                    className="flex items-center gap-3 rounded-lg border border-border bg-card p-3"
-                  >
-                    <FileIcon type={file.type} />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{file.name}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {(file.size / 1024).toFixed(1)} KB
-                      </p>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 flex-shrink-0 text-muted-foreground hover:text-destructive"
-                      onClick={() => removeFile(file.id)}
-                      aria-label={`Remove ${file.name}`}
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
+            <div className="max-h-52 space-y-2 overflow-y-auto">
+              {files.map((file) => (
+                <div
+                  key={file.id}
+                  className="flex items-center gap-3 rounded-lg border border-border bg-card p-3"
+                >
+                  <FileImage className="h-4 w-4 text-blue-500" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{file.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {(file.size / 1024).toFixed(1)} KB
+                    </p>
                   </div>
-                ))}
-              </div>
-            </ScrollArea>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 flex-shrink-0 text-muted-foreground hover:text-destructive"
+                    onClick={() => removeFile(file.id)}
+                    aria-label={`Remove ${file.name}`}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
           )}
 
           <DialogFooter>

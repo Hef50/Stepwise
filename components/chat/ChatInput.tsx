@@ -39,21 +39,15 @@ export function ChatInput({
   lastAssistantMessage,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // Track whether we are currently in a voice session so we know when to
-  // flush the final transcript into the input.
   const wasListeningRef = useRef(false);
 
-  // Auto-resize textarea as content grows
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [value]);
 
-  // Voice transcript → input integration.
-  // We track the listening→idle transition: when recognition ends with a
-  // non-empty transcript, push it into the input in one clean update.
   useEffect(() => {
     const { mode, transcript } = voice.state;
 
@@ -65,7 +59,6 @@ export function ChatInput({
       wasListeningRef.current = false;
       if (transcript) {
         onChange(transcript);
-        // Focus the textarea so the user can immediately edit or submit
         setTimeout(() => textareaRef.current?.focus(), 0);
       }
     }
@@ -84,14 +77,12 @@ export function ChatInput({
   const isListening = voice.state.mode === "listening";
 
   return (
-    <form onSubmit={onSubmit} className="flex flex-col gap-2 p-3 border-t border-border bg-background">
+    <form onSubmit={onSubmit} className="flex flex-col gap-2 bg-background p-3">
 
-      {/* Error message */}
       {voice.state.error && (
         <p className="text-xs text-destructive px-1">{voice.state.error}</p>
       )}
 
-      {/* Attached files preview strip */}
       {files.length > 0 && (
         <div className="flex flex-wrap gap-1 px-1">
           {files.map((f) => (
@@ -105,9 +96,40 @@ export function ChatInput({
         </div>
       )}
 
-      <div className="flex items-end gap-2">
-        {/* Left toolbar */}
-        <div className="flex flex-shrink-0 items-center">
+      {/* Full-width textarea */}
+      <div className="relative w-full">
+        <Textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={
+            isListening
+              ? voice.state.transcript
+                ? voice.state.transcript
+                : "Listening…"
+              : "Ask anything…"
+          }
+          disabled={isLoading || isListening}
+          rows={1}
+          className="min-h-[44px] w-full resize-none overflow-hidden py-3"
+          aria-label="Chat message input"
+        />
+        {isListening && (
+          <div className="pointer-events-none absolute inset-0 flex items-start rounded-md bg-red-50/80 px-3 py-3 dark:bg-red-950/40">
+            <div className="flex w-full items-center gap-2">
+              <span className="inline-block h-2 w-2 flex-shrink-0 animate-ping rounded-full bg-red-500" />
+              <span className="truncate text-sm text-red-700 dark:text-red-300">
+                {voice.state.transcript || "Listening — speak your question…"}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Toolbar row — no longer competing with textarea for width */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center">
           <FileUpload files={files} onFilesChange={onFilesChange} />
           <Tooltip>
             <TooltipTrigger asChild>
@@ -115,6 +137,7 @@ export function ChatInput({
                 type="button"
                 variant="ghost"
                 size="icon"
+                className="h-11 w-11 flex-shrink-0"
                 onClick={onCaptureWhiteboard}
                 aria-label="Send whiteboard to AI"
               >
@@ -125,39 +148,6 @@ export function ChatInput({
           </Tooltip>
         </div>
 
-        {/* Textarea — shows live interim transcript as a placeholder while listening */}
-        <div className="relative flex-1">
-          <Textarea
-            ref={textareaRef}
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={
-              isListening
-                ? voice.state.transcript
-                  ? voice.state.transcript
-                  : "Listening…"
-                : "Ask anything… (Enter to send, Shift+Enter for new line)"
-            }
-            disabled={isLoading || isListening}
-            rows={1}
-            className="flex-1 resize-none overflow-hidden min-h-[44px] max-h-[200px] py-3 w-full"
-            aria-label="Chat message input"
-          />
-          {/* Live transcript overlay shown while listening */}
-          {isListening && (
-            <div className="absolute inset-0 flex items-start rounded-md bg-red-50/80 dark:bg-red-950/40 px-3 py-3 pointer-events-none">
-              <div className="flex items-center gap-2 w-full">
-                <span className="inline-block h-2 w-2 flex-shrink-0 animate-ping rounded-full bg-red-500" />
-                <span className="text-sm text-red-700 dark:text-red-300 truncate">
-                  {voice.state.transcript || "Listening — speak your question…"}
-                </span>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Right toolbar */}
         <div className="flex flex-shrink-0 items-center gap-1">
           <VoiceControls voice={voice} lastAssistantMessage={lastAssistantMessage} />
           {isLoading ? (
@@ -165,6 +155,7 @@ export function ChatInput({
               type="button"
               size="icon"
               variant="destructive"
+              className="h-11 w-11"
               onClick={onStop}
               aria-label="Stop generating"
             >
@@ -174,6 +165,7 @@ export function ChatInput({
             <Button
               type="submit"
               size="icon"
+              className="h-11 w-11"
               disabled={isListening || !value.trim()}
               aria-label="Send message"
             >

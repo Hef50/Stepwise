@@ -110,6 +110,18 @@ export interface UploadedFile {
   size: number;
 }
 
+// ─── Course Materials (persistent PDFs) ──────────────────────────────────────
+
+export interface CourseMaterial {
+  id: string;
+  name: string;
+  pageCount: number;
+  /** Full extracted text — persisted locally, injected into LLM when enabled */
+  text: string;
+  enabled: boolean;
+  addedAt: string;
+}
+
 // ─── Materials Extract API ────────────────────────────────────────────────────
 
 export interface MaterialExtractRequest {

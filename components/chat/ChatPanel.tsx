@@ -14,12 +14,13 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { ChatMessages } from "./ChatMessages";
 import { ChatInput } from "./ChatInput";
+import { CourseMaterialsBar } from "./CourseMaterialsBar";
 import { useVoiceTA } from "@/hooks/useVoiceTA";
 import { useChatPersistence } from "@/hooks/useChatPersistence";
+import { useCourseMaterials, toMessageAttachment } from "@/hooks/useCourseMaterials";
 import type {
   UploadedFile,
   CanvasPayload,
-  MaterialExtractResponse,
   ActiveModel,
   ChatProvider,
   MessagePdfAttachment,
@@ -46,13 +47,13 @@ function isRateLimitError(error: Error | null | undefined): boolean {
 export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<UploadedFile[]>([]);
-  const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   /** Once true, all subsequent messages in this session use Gemma via OpenRouter */
   const [escalated, setEscalated] = useState(false);
   /** True if the user manually downgraded from Gemma to LLM7 to escape a rate limit */
   const [manuallyDowngraded, setManuallyDowngraded] = useState(false);
   const voice = useVoiceTA();
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
+  const courseMaterials = useCourseMaterials();
 
   const provider: ChatProvider = escalated ? "gemma" : "llm7";
 
@@ -66,7 +67,10 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
     messages: [],
   });
 
-  const isLoading = status === "streaming" || status === "submitted" || isProcessingFiles;
+  const isLoading =
+    status === "streaming" ||
+    status === "submitted" ||
+    courseMaterials.isAdding;
   const isRateLimited = status === "error" && escalated && isRateLimitError(error);
 
   // Restore persisted messages after hydration (client-only)
@@ -100,7 +104,6 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
       if (!trimmed || isLoading) return;
 
       const imageFiles = files.filter((f) => f.type.startsWith("image/"));
-      const pdfFiles = files.filter((f) => f.type === "application/pdf");
 
       // Determine if this message escalates to Gemma
       const needsVision = imageFiles.length > 0;
@@ -123,35 +126,9 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
         parts.push({ type: "file", mediaType: img.type, url: img.dataUrl });
       }
 
-      // Extract text from PDFs — stored in metadata for UI; injected server-side for the model
-      const pdfAttachments: MessagePdfAttachment[] = [];
-      if (pdfFiles.length > 0) {
-        setIsProcessingFiles(true);
-        try {
-          for (const pdf of pdfFiles) {
-            try {
-              const res = await fetch("/api/materials/extract", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ dataUrl: pdf.dataUrl, name: pdf.name }),
-              });
-              if (res.ok) {
-                const data = (await res.json()) as MaterialExtractResponse;
-                pdfAttachments.push({
-                  id: pdf.id,
-                  name: data.name,
-                  pageCount: data.pageCount,
-                  text: data.text,
-                });
-              }
-            } catch {
-              // Non-fatal: skip this PDF silently
-            }
-          }
-        } finally {
-          setIsProcessingFiles(false);
-        }
-      }
+      // Snapshot enabled course materials into message metadata (server injects for LLM)
+      const pdfAttachments: MessagePdfAttachment[] =
+        courseMaterials.enabledMaterials.map(toMessageAttachment);
 
       parts.push({ type: "text", text: trimmed });
 
@@ -165,7 +142,7 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
       setInput("");
       setFiles([]);
     },
-    [input, files, isLoading, escalated, sendMessage]
+    [input, files, isLoading, escalated, sendMessage, courseMaterials.enabledMaterials]
   );
 
   const handleCaptureWhiteboard = useCallback(async () => {
@@ -295,7 +272,16 @@ export function ChatPanel({ captureWhiteboard, onActiveModelChange }: ChatPanelP
           </div>
         )}
 
-        {/* Input */}
+        {/* Course materials + input */}
+        <CourseMaterialsBar
+          materials={courseMaterials.materials}
+          isAdding={courseMaterials.isAdding}
+          addError={courseMaterials.addError}
+          onAddFromFile={courseMaterials.addFromFile}
+          onToggle={courseMaterials.toggleMaterial}
+          onRemove={courseMaterials.removeMaterial}
+          onClearAddError={courseMaterials.clearAddError}
+        />
         <ChatInput
           value={input}
           onChange={setInput}
