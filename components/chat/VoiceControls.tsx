@@ -1,6 +1,6 @@
 "use client";
 
-import { Headphones, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
+import { Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -23,7 +23,6 @@ function VoiceControlsInner({ voice, lastAssistantMessage }: VoiceControlsProps)
     stopListening,
     speak,
     cancelSpeech,
-    toggleNativeVoiceMode,
     setVoiceSpeed,
   } = voice;
 
@@ -74,27 +73,6 @@ function VoiceControlsInner({ voice, lastAssistantMessage }: VoiceControlsProps)
         </TooltipTrigger>
         <TooltipContent>
           {isListening ? "Stop listening" : "Speak your question"}
-        </TooltipContent>
-      </Tooltip>
-
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={toggleNativeVoiceMode}
-            aria-label="Toggle native voice mode"
-            className={cn(
-              state.nativeVoiceModeEnabled &&
-                "bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400"
-            )}
-          >
-            <Headphones className="h-5 w-5" />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>
-          {state.nativeVoiceModeEnabled ? "Native voice mode on" : "Native voice mode off"}
         </TooltipContent>
       </Tooltip>
 

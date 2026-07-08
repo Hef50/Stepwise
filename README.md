@@ -10,6 +10,7 @@ A responsive AI tutoring web app with a streaming chat interface, interactive tl
 - **Mermaid diagrams** — flowcharts and diagrams rendered inline from AI responses
 - **Schemdraw diagrams** — circuit/physics diagram code displayed with an elegant placeholder
 - **Voice interface** — Web Speech API for free, fully local STT + TTS
+- **Live audio mode** — Gemini Live call-style audio with centered captions
 - **File upload** — attach images and PDFs to the AI context
 - **LocalStorage persistence** — chat history survives page refresh
 
@@ -21,8 +22,9 @@ npm install
 
 # 2. Configure environment variables
 cp .env.example .env.local
-# Fill in LLM7_API_KEY and one vision key:
-# OPENROUTER_API_KEY, GEMINI_API_KEY, or GOOGLE_GENERATIVE_AI_API_KEY
+# Fill in LLM7_API_KEY.
+# For whiteboard vision and Gemini Live audio, add either:
+# GEMINI_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY
 
 # 3. Run the dev server
 npm run dev
@@ -36,7 +38,7 @@ Open [http://localhost:3000](http://localhost:3000).
 |---|---|---|
 | `LLM7_API_KEY` | LLM7 API token for text generation | [dash.llm7.io](https://dash.llm7.io) |
 | `OPENROUTER_API_KEY` | Optional OpenRouter key for whiteboard vision | [openrouter.ai](https://openrouter.ai) |
-| `GEMINI_API_KEY` or `GOOGLE_GENERATIVE_AI_API_KEY` | Optional Google Gemini key for whiteboard vision | [aistudio.google.com](https://aistudio.google.com/apikey) |
+| `GEMINI_API_KEY` or `GOOGLE_GENERATIVE_AI_API_KEY` | Google Gemini key for whiteboard vision and Gemini Live audio | [aistudio.google.com](https://aistudio.google.com/apikey) |
 
 ## Architecture
 
@@ -44,6 +46,7 @@ Open [http://localhost:3000](http://localhost:3000).
 app/
   api/
     chat/route.ts       ← LLM7 streaming text endpoint (server-only)
+    live-token/route.ts ← short-lived Gemini Live token endpoint (server-only)
     vision/route.ts     ← Gemini vision endpoint (server-only)
   layout.tsx
   page.tsx

@@ -26,6 +26,8 @@ export interface ChatSession {
 
 // ─── Voice ────────────────────────────────────────────────────────────────────
 
+export type InteractionMode = "text" | "mixed" | "audio";
+
 export type VoiceMode = "idle" | "listening" | "speaking" | "error";
 
 export interface VoiceTranscriptEntry {

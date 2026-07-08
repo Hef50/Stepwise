@@ -11,7 +11,11 @@ import {
 } from "@/components/ui/tooltip";
 import { VoiceControls } from "./VoiceControls";
 import { FileUpload } from "./FileUpload";
-import type { VoiceControls as VoiceControlsType, UploadedFile } from "@/lib/types";
+import type {
+  InteractionMode,
+  VoiceControls as VoiceControlsType,
+  UploadedFile,
+} from "@/lib/types";
 
 interface ChatInputProps {
   value: string;
@@ -24,6 +28,7 @@ interface ChatInputProps {
   onFilesChange: (files: UploadedFile[]) => void;
   onCaptureWhiteboard: () => void;
   lastAssistantMessage?: string;
+  interactionMode: InteractionMode;
 }
 
 export function ChatInput({
@@ -37,6 +42,7 @@ export function ChatInput({
   onFilesChange,
   onCaptureWhiteboard,
   lastAssistantMessage,
+  interactionMode,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -58,8 +64,7 @@ export function ChatInput({
   };
 
   const isListening = voice.state.mode === "listening";
-  const captions = voice.state.captions || voice.state.transcript || "Listening…";
-  const transcriptHistory = voice.state.transcriptHistory.slice(-4);
+  const voiceEnabled = interactionMode === "mixed";
 
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-2 border-t border-border bg-background p-3">
@@ -110,12 +115,12 @@ export function ChatInput({
                 ? voice.state.transcript || "Listening…"
                 : "Ask anything… (Enter to send, Shift+Enter for new line)"
             }
-            disabled={isLoading || isListening}
+            disabled={isLoading || (voiceEnabled && isListening)}
             rows={1}
             className="flex-1 min-h-[44px] w-full max-h-[200px] resize-none overflow-hidden py-3"
             aria-label="Chat message input"
           />
-          {isListening && (
+          {voiceEnabled && isListening && (
             <div className="pointer-events-none absolute inset-0 flex items-start rounded-md bg-red-50/80 px-3 py-3 dark:bg-red-950/40">
               <div className="flex w-full items-center gap-2">
                 <span className="inline-block h-2 w-2 flex-shrink-0 animate-ping rounded-full bg-red-500" />
@@ -128,7 +133,9 @@ export function ChatInput({
         </div>
 
         <div className="flex flex-shrink-0 items-center gap-1">
-          <VoiceControls voice={voice} lastAssistantMessage={lastAssistantMessage} />
+          {voiceEnabled && (
+            <VoiceControls voice={voice} lastAssistantMessage={lastAssistantMessage} />
+          )}
           {isLoading ? (
             <Button
               type="button"
@@ -143,35 +150,11 @@ export function ChatInput({
             <Button
               type="submit"
               size="icon"
-              disabled={isListening || !value.trim()}
+              disabled={(voiceEnabled && isListening) || !value.trim()}
               aria-label="Send message"
             >
               <Send className="h-5 w-5" />
             </Button>
-          )}
-        </div>
-      </div>
-
-      <div className="rounded-md border border-border bg-muted/40 p-2">
-        <div className="mb-1 flex items-center justify-between text-[11px] uppercase tracking-wide text-muted-foreground">
-          <span>Voice captions</span>
-          <span>{voice.state.nativeVoiceModeEnabled ? "native on" : "native off"}</span>
-        </div>
-        <div className="space-y-1 text-sm">
-          <div className="rounded bg-background/70 px-2 py-1 text-foreground">{captions}</div>
-          {transcriptHistory.length > 0 ? (
-            transcriptHistory.map((entry) => (
-              <div key={entry.id} className="rounded bg-background/70 px-2 py-1 text-xs text-muted-foreground">
-                <span className="mr-1 font-medium text-foreground">
-                  {entry.role === "user" ? "You" : "AI"}:
-                </span>
-                {entry.text}
-              </div>
-            ))
-          ) : (
-            <div className="rounded bg-background/70 px-2 py-1 text-xs text-muted-foreground">
-              Voice transcripts will appear here as you talk and respond.
-            </div>
           )}
         </div>
       </div>

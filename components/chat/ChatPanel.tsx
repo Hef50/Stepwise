@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect, type FormEvent } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { Trash2, Settings } from "lucide-react";
+import { MessageCircle, Mic2, Settings, Trash2, Type } from "lucide-react";
 import { Dialog, DialogTrigger } from "@/components/ui/dialog";
 import SettingsPanel from "@/components/common/SettingsPanel";
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,11 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { ChatMessages } from "./ChatMessages";
 import { ChatInput } from "./ChatInput";
+import { AudioOnlyPanel } from "./AudioOnlyPanel";
 import { useVoiceTA } from "@/hooks/useVoiceTA";
+import { useGeminiLive } from "@/hooks/useGeminiLive";
 import { useChatPersistence } from "@/hooks/useChatPersistence";
-import type { UploadedFile, CanvasPayload } from "@/lib/types";
+import type { UploadedFile, CanvasPayload, InteractionMode } from "@/lib/types";
 
 interface ChatPanelProps {
   captureWhiteboard: () => Promise<CanvasPayload | null>;
@@ -50,8 +52,10 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isPreparingContext, setIsPreparingContext] = useState(false);
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>("text");
   const lastSpokenAssistantRef = useRef<string | null>(null);
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
+  const live = useGeminiLive();
 
   // Always start with empty messages so server and client render the same
   // initial HTML. Persisted messages are restored client-side in useEffect.
@@ -101,11 +105,20 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   );
 
   const voice = useVoiceTA((transcript) => {
+    if (interactionMode !== "mixed") return;
     setInput(transcript);
     window.setTimeout(() => {
       submitText(transcript);
     }, 80);
   });
+  const { cancelSpeech, speak, stopListening } = voice;
+
+  useEffect(() => {
+    if (interactionMode !== "mixed") {
+      cancelSpeech();
+      stopListening();
+    }
+  }, [cancelSpeech, interactionMode, stopListening]);
 
   // Restore persisted messages after hydration (client-only)
   useEffect(() => {
@@ -146,7 +159,13 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
       .map((part) => (part.type === "text" ? part.text : ""))
       .join("") ?? "";
 
-    if (!lastAssistantText || !voice.state.nativeVoiceModeEnabled || !voice.state.supported) {
+    if (
+      interactionMode !== "mixed" ||
+      isGenerating ||
+      isPreparingContext ||
+      !lastAssistantText ||
+      !voice.state.supported
+    ) {
       return;
     }
 
@@ -156,35 +175,48 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
     }
 
     lastSpokenAssistantRef.current = assistantId;
-    voice.speak(lastAssistantText);
-  }, [messages, voice]);
+    speak(lastAssistantText);
+  }, [
+    interactionMode,
+    isGenerating,
+    isPreparingContext,
+    messages,
+    speak,
+    voice.state.supported,
+  ]);
+
+  const getWhiteboardAnalysis = useCallback(async (): Promise<string | null> => {
+    const payload = await captureWhiteboard();
+    if (!payload?.imageDataUrl) return null;
+
+    const res = await fetch("/api/vision", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt:
+          "Analyze what is drawn on this whiteboard. Describe the content clearly so the AI tutor can reference it in the conversation.",
+        images: [payload.imageDataUrl],
+      }),
+    });
+
+    if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
+    const data = (await res.json()) as { analysis?: string };
+    return data.analysis?.trim() ?? null;
+  }, [captureWhiteboard]);
 
   const handleCaptureWhiteboard = useCallback(async () => {
-    const payload = await captureWhiteboard();
-    if (!payload?.imageDataUrl) return;
-
     try {
-      const res = await fetch("/api/vision", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt:
-            "Analyze what is drawn on this whiteboard. Describe the content clearly so the AI tutor can reference it in the conversation.",
-          images: [payload.imageDataUrl],
-        }),
-      });
-
-      if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
-      const data = (await res.json()) as { analysis: string };
+      const analysis = await getWhiteboardAnalysis();
+      if (!analysis) return;
 
       sendMessage(
         { text: "Please analyze the whiteboard." },
-        { body: { visualContext: data.analysis } }
+        { body: { visualContext: analysis } }
       );
     } catch (err) {
       console.error("[ChatPanel] Whiteboard vision error:", err);
     }
-  }, [captureWhiteboard, sendMessage]);
+  }, [getWhiteboardAnalysis, sendMessage]);
 
   const handleDeleteMessage = useCallback(
     (id: string) => {
@@ -212,66 +244,110 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
     <TooltipProvider>
       <div className="flex h-full flex-col overflow-hidden">
         {/* Header */}
-        <div className="flex flex-shrink-0 items-center justify-between px-4 py-3 border-b border-border">
-          <div>
-            <h1 className="text-sm font-semibold">Stepwise</h1>
-            <p className="text-xs text-muted-foreground">AI Tutor</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Dialog>
+        <div className="flex flex-shrink-0 flex-col gap-3 px-4 py-3 border-b border-border">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h1 className="text-sm font-semibold">Stepwise</h1>
+              <p className="text-xs text-muted-foreground">AI Tutor</p>
+            </div>
+
+            <div className="flex items-center gap-1">
+              <Dialog>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <DialogTrigger asChild>
+                      <Button type="button" variant="ghost" size="icon" aria-label="Settings">
+                        <Settings className="h-4 w-4 text-muted-foreground" />
+                      </Button>
+                    </DialogTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent>Settings</TooltipContent>
+                </Tooltip>
+
+                <SettingsPanel onClose={() => { /* dialog close handled internally by Dialog */ }} />
+              </Dialog>
+
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <DialogTrigger asChild>
-                    <Button type="button" variant="ghost" size="icon" aria-label="Settings">
-                      <Settings className="h-4 w-4 text-muted-foreground" />
-                    </Button>
-                  </DialogTrigger>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={handleClear}
+                    aria-label="Clear chat history"
+                  >
+                    <Trash2 className="h-4 w-4 text-muted-foreground" />
+                  </Button>
                 </TooltipTrigger>
-                <TooltipContent>Settings</TooltipContent>
+                <TooltipContent>Clear chat history</TooltipContent>
               </Tooltip>
+            </div>
+          </div>
 
-              <SettingsPanel onClose={() => { /* dialog close handled internally by Dialog */ }} />
-            </Dialog>
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={handleClear}
-                  aria-label="Clear chat history"
-                >
-                  <Trash2 className="h-4 w-4 text-muted-foreground" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Clear chat history</TooltipContent>
-            </Tooltip>
+          <div className="flex rounded-md border border-border bg-muted/40 p-1">
+              <Button
+                type="button"
+                variant={interactionMode === "text" ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setInteractionMode("text")}
+                aria-label="Text-only mode"
+                className="h-8 flex-1 px-2"
+              >
+                <Type className="h-4 w-4" />
+                Text
+              </Button>
+              <Button
+                type="button"
+                variant={interactionMode === "mixed" ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setInteractionMode("mixed")}
+                aria-label="Mixed mode"
+                className="h-8 flex-1 px-2"
+              >
+                <MessageCircle className="h-4 w-4" />
+                Mixed
+              </Button>
+              <Button
+                type="button"
+                variant={interactionMode === "audio" ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setInteractionMode("audio")}
+                aria-label="Audio-only mode"
+                className="h-8 flex-1 px-2"
+              >
+                <Mic2 className="h-4 w-4" />
+                Audio
+              </Button>
           </div>
         </div>
 
         <Separator />
 
-        {/* Messages */}
-        <ChatMessages
-          messages={messages}
-          isLoading={isLoading}
-          onDeleteMessage={handleDeleteMessage}
-        />
+        {interactionMode === "audio" ? (
+          <AudioOnlyPanel live={live} onShareWhiteboard={getWhiteboardAnalysis} />
+        ) : (
+          <>
+            <ChatMessages
+              messages={messages}
+              isLoading={isLoading}
+              onDeleteMessage={handleDeleteMessage}
+            />
 
-        {/* Input */}
-        <ChatInput
-          value={input}
-          onChange={setInput}
-          onSubmit={handleSubmit}
-          onStop={stop}
-          isLoading={isLoading}
-          voice={voice}
-          files={files}
-          onFilesChange={setFiles}
-          onCaptureWhiteboard={handleCaptureWhiteboard}
-          lastAssistantMessage={lastAssistantText}
-        />
+            <ChatInput
+              value={input}
+              onChange={setInput}
+              onSubmit={handleSubmit}
+              onStop={stop}
+              isLoading={isLoading}
+              voice={voice}
+              files={files}
+              onFilesChange={setFiles}
+              onCaptureWhiteboard={handleCaptureWhiteboard}
+              lastAssistantMessage={lastAssistantText}
+              interactionMode={interactionMode}
+            />
+          </>
+        )}
       </div>
     </TooltipProvider>
   );
