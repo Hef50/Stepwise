@@ -15,9 +15,20 @@ interface MessageBubbleProps {
   textOverride?: string;
   /** Called when the user clicks "Go to equation" for a given latex string. */
   focusEquation?: (latex: string) => void;
+  /** Equations finished on the whiteboard (live streaming only). */
+  readyEquations?: ReadonlySet<string>;
+  /** Hide undrawn equation cards while streaming. */
+  hideUntilReady?: boolean;
 }
 
-export function MessageBubble({ message, onDelete, textOverride, focusEquation }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  onDelete,
+  textOverride,
+  focusEquation,
+  readyEquations,
+  hideUntilReady,
+}: MessageBubbleProps) {
   const isUser = message.role === "user";
 
   // Exclude tool invocations that are silently routed to the canvas —
@@ -100,7 +111,12 @@ export function MessageBubble({ message, onDelete, textOverride, focusEquation }
               <p className="whitespace-pre-wrap break-words leading-relaxed">{textContent}</p>
             ) : null
           ) : (
-            <MessageRenderer content={textContent} focusEquation={focusEquation} />
+            <MessageRenderer
+              content={textContent}
+              focusEquation={focusEquation}
+              readyEquations={readyEquations}
+              hideUntilReady={hideUntilReady}
+            />
           )}
         </div>
 

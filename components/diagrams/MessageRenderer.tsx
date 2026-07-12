@@ -2,12 +2,22 @@
 
 import { useMemo } from "react";
 import { parseMessageBlocks } from "@/lib/markdown/parseBlocks";
-import { segmentTextWithEquations } from "@/lib/chat/extractEquations";
+import {
+  segmentTextWithEquations,
+  stripIncompleteMathDelimiters,
+} from "@/lib/chat/extractEquations";
 
 interface MessageRendererProps {
   content: string;
   /** Called when the user clicks "Go to equation" for a given latex string. */
   focusEquation?: (latex: string) => void;
+  /**
+   * When set (live streaming), equation cards only appear for latex that has
+   * finished drawing. When omitted, all worthy equations show as cards.
+   */
+  readyEquations?: ReadonlySet<string>;
+  /** Pair with readyEquations during live reveal to hide undrawn math. */
+  hideUntilReady?: boolean;
 }
 
 // ─── Equation card ────────────────────────────────────────────────────────────
@@ -41,10 +51,23 @@ function EquationCard({ latex, onGoTo }: EquationCardProps) {
 interface TextBlockProps {
   content: string;
   focusEquation?: (latex: string) => void;
+  readyEquations?: ReadonlySet<string>;
+  hideUntilReady?: boolean;
 }
 
-function TextBlock({ content, focusEquation }: TextBlockProps) {
-  const segments = useMemo(() => segmentTextWithEquations(content), [content]);
+function TextBlock({
+  content,
+  focusEquation,
+  readyEquations,
+  hideUntilReady,
+}: TextBlockProps) {
+  const segments = useMemo(() => {
+    const cleaned = stripIncompleteMathDelimiters(content);
+    return segmentTextWithEquations(cleaned, {
+      readyEquations,
+      hideUntilReady,
+    });
+  }, [content, readyEquations, hideUntilReady]);
 
   return (
     <div className="space-y-1">
@@ -54,7 +77,9 @@ function TextBlock({ content, focusEquation }: TextBlockProps) {
             <EquationCard
               key={i}
               latex={seg.latex}
-              onGoTo={focusEquation ? () => focusEquation(seg.latex) : undefined}
+              onGoTo={
+                focusEquation ? () => focusEquation(seg.latex) : undefined
+              }
             />
           );
         }
@@ -73,7 +98,12 @@ function TextBlock({ content, focusEquation }: TextBlockProps) {
 
 // ─── Main renderer ────────────────────────────────────────────────────────────
 
-export function MessageRenderer({ content, focusEquation }: MessageRendererProps) {
+export function MessageRenderer({
+  content,
+  focusEquation,
+  readyEquations,
+  hideUntilReady,
+}: MessageRendererProps) {
   const blocks = useMemo(() => parseMessageBlocks(content), [content]);
 
   return (
@@ -85,6 +115,8 @@ export function MessageRenderer({ content, focusEquation }: MessageRendererProps
               key={index}
               content={block.content}
               focusEquation={focusEquation}
+              readyEquations={readyEquations}
+              hideUntilReady={hideUntilReady}
             />
           );
         }

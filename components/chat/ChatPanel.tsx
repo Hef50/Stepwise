@@ -16,6 +16,7 @@ import { ChatMessages } from "./ChatMessages";
 import { ChatInput } from "./ChatInput";
 import { CourseMaterialsBar } from "./CourseMaterialsBar";
 import { TextSpeedSlider } from "./TextSpeedSlider";
+import { LatexFontSizeSlider } from "./LatexFontSizeSlider";
 import { loadTextSpeed, saveTextSpeed } from "@/lib/chat/textReveal";
 import { useVoiceTA } from "@/hooks/useVoiceTA";
 import { useChatPersistence } from "@/hooks/useChatPersistence";
@@ -39,6 +40,14 @@ interface ChatPanelProps {
   renderLatexOnCanvas?: (latex: string, displayMode?: boolean) => Promise<string | null>;
   /** Pan + zoom the canvas to focus on the given tldraw shape id. */
   focusLatexShape?: (shapeId: string) => void;
+  /** Current on-canvas LaTeX font size (px ≈ 1em). */
+  latexFontSize?: number;
+  /** Persist + apply a new LaTeX font size across existing shapes. */
+  onLatexFontSizeChange?: (size: number) => void;
+  /** Wipe the whiteboard document (shapes + IndexedDB persistence). */
+  onClearWhiteboard?: () => Promise<void> | void;
+  /** True once the tldraw editor has mounted and can accept shapes. */
+  editorReady?: boolean;
   onActiveModelChange?: (model: ActiveModel) => void;
 }
 
@@ -56,6 +65,10 @@ export function ChatPanel({
   captureWhiteboard,
   renderLatexOnCanvas,
   focusLatexShape,
+  latexFontSize,
+  onLatexFontSizeChange,
+  onClearWhiteboard,
+  editorReady = false,
   onActiveModelChange,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
@@ -65,6 +78,7 @@ export function ChatPanel({
   /** True if the user manually downgraded from Gemma to LLM7 to escape a rate limit */
   const [manuallyDowngraded, setManuallyDowngraded] = useState(false);
   const [textSpeed, setTextSpeed] = useState(loadTextSpeed);
+  const [isCatchingUpReveal, setIsCatchingUpReveal] = useState(false);
   const voice = useVoiceTA();
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
   const courseMaterials = useCourseMaterials();
@@ -76,6 +90,79 @@ export function ChatPanel({
   const renderedEquationsRef = useRef<Set<string>>(new Set());
   /** Throttled reveal text from ChatMessages — extraction keys off this, not the raw stream. */
   const [revealedText, setRevealedText] = useState("");
+  /**
+   * Serial draw queue: at most one equation animates at a time, and text reveal
+   * is paused while a draw is in flight.
+   */
+  const drawQueueRef = useRef<string[]>([]);
+  const drawingRef = useRef(false);
+  const [revealPaused, setRevealPaused] = useState(false);
+  /** Latex strings whose whiteboard draw has finished — unlocks chat cards. */
+  const [readyEquations, setReadyEquations] = useState<Set<string>>(
+    () => new Set()
+  );
+  const renderLatexRef = useRef(renderLatexOnCanvas);
+  renderLatexRef.current = renderLatexOnCanvas;
+
+  const markEquationReady = useCallback((latex: string) => {
+    const key = latex.trim();
+    setReadyEquations((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, []);
+
+  const enqueueLatexDraw = useCallback((latex: string) => {
+    const key = latex.trim();
+    if (!key) return;
+    if (renderedEquationsRef.current.has(key)) return;
+    if (drawQueueRef.current.some((q) => q.trim() === key)) return;
+    renderedEquationsRef.current.add(key);
+    drawQueueRef.current.push(latex);
+  }, []);
+
+  const processDrawQueue = useCallback(async () => {
+    if (drawingRef.current) return;
+    if (!editorReady) return;
+    const render = renderLatexRef.current;
+    if (!render) return;
+    if (drawQueueRef.current.length === 0) return;
+
+    drawingRef.current = true;
+    setRevealPaused(true);
+
+    try {
+      while (drawQueueRef.current.length > 0) {
+        const eq = drawQueueRef.current.shift();
+        if (!eq) break;
+        const shapeId = await render(eq, true);
+        if (shapeId) {
+          equationShapeMapRef.current.set(eq.trim(), shapeId);
+          markEquationReady(eq);
+        } else {
+          // Allow a later retry if placement failed
+          renderedEquationsRef.current.delete(eq.trim());
+        }
+      }
+    } finally {
+      const hasMore = drawQueueRef.current.length > 0;
+      drawingRef.current = false;
+      if (hasMore) {
+        // Keep text paused; immediately continue the queue
+        void processDrawQueue();
+      } else {
+        setRevealPaused(false);
+      }
+    }
+  }, [editorReady, markEquationReady]);
+
+  // Keep stable refs for useChat.onToolCall (may capture an early closure)
+  const enqueueLatexDrawRef = useRef(enqueueLatexDraw);
+  enqueueLatexDrawRef.current = enqueueLatexDraw;
+  const processDrawQueueRef = useRef(processDrawQueue);
+  processDrawQueueRef.current = processDrawQueue;
 
   const provider: ChatProvider = escalated ? "gemma" : "llm7";
 
@@ -99,19 +186,15 @@ export function ChatPanel({
         if (toolCall.dynamic) return;
 
         if (toolCall.toolName === "render_math_whiteboard") {
-          const { latex, displayMode } = toolCall.input as {
+          const { latex } = toolCall.input as {
             latex: string;
             displayMode?: boolean;
           };
 
-          // Route the LaTeX to the canvas and store the resulting shape id
-          if (renderLatexOnCanvas) {
-            void renderLatexOnCanvas(latex, displayMode).then((shapeId) => {
-              if (shapeId) {
-                equationShapeMapRef.current.set(latex.trim(), shapeId);
-              }
-            });
-          }
+          // Serialise through the same draw queue as prose-extracted equations
+          // so only one equation draws at a time and text pauses during it.
+          enqueueLatexDrawRef.current(latex);
+          void processDrawQueueRef.current();
 
           // Acknowledge the tool call immediately so the AI stream can continue
           addToolOutput({
@@ -122,6 +205,37 @@ export function ChatPanel({
         }
       },
     });
+
+  /**
+   * Stop generation / reveal mid-stream and hard-cut the assistant message
+   * to whatever has already been revealed — so later turns don't keep the
+   * truncated tail as context.
+   */
+  const handleStopGeneration = useCallback(() => {
+    stop();
+
+    // Abort any in-flight whiteboard draws
+    drawQueueRef.current = [];
+    drawingRef.current = false;
+    setRevealPaused(false);
+
+    const cutoff = revealedText.trimEnd();
+    if (!cutoff) return;
+
+    setMessages((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.role !== "assistant") return prev;
+
+      return [
+        ...prev.slice(0, -1),
+        {
+          ...last,
+          parts: [{ type: "text" as const, text: cutoff }],
+        },
+      ];
+    });
+  }, [stop, revealedText, setMessages]);
 
   const isLoading =
     status === "streaming" ||
@@ -154,22 +268,26 @@ export function ChatPanel({
   }, [messages, saveMessages]);
 
   // ── Reveal-synced equation extraction → whiteboard ───────────────────────
-  // Keyed off the throttled `revealedText` (not the raw stream) so equations are
-  // placed on the canvas only once the chat has visibly typed that far.
-  // extractNewEquations only returns equations not yet in renderedEquationsRef,
-  // so each unique equation is placed on the canvas exactly once.
+  // Keyed off the throttled `revealedText` so equations are queued only once
+  // the chat has visibly typed that far. The draw queue serialises animation
+  // (one at a time) and pauses text reveal while a draw is in flight.
   useEffect(() => {
-    if (!renderLatexOnCanvas || !revealedText) return;
+    if (!renderLatexOnCanvas || !revealedText || !editorReady) return;
 
-    const newEqs = extractNewEquations(revealedText, renderedEquationsRef.current);
+    const newEqs = extractNewEquations(
+      revealedText,
+      renderedEquationsRef.current
+    );
+    if (newEqs.length === 0) return;
+
+    // extractNewEquations already marked these as seen
     for (const eq of newEqs) {
-      void renderLatexOnCanvas(eq, true).then((shapeId) => {
-        if (shapeId) {
-          equationShapeMapRef.current.set(eq.trim(), shapeId);
-        }
-      });
+      if (!drawQueueRef.current.some((q) => q.trim() === eq.trim())) {
+        drawQueueRef.current.push(eq);
+      }
     }
-  }, [revealedText, renderLatexOnCanvas]);
+    void processDrawQueue();
+  }, [revealedText, renderLatexOnCanvas, editorReady, processDrawQueue]);
 
   /** Pan + zoom the tldraw canvas to the shape linked to `latex`. */
   const focusEquation = useCallback(
@@ -268,8 +386,16 @@ export function ChatPanel({
     setEscalated(false);
     setManuallyDowngraded(false);
     clearSession();
-    window.location.reload();
-  }, [clearSession]);
+    equationShapeMapRef.current.clear();
+    renderedEquationsRef.current.clear();
+    drawQueueRef.current = [];
+    drawingRef.current = false;
+    setRevealPaused(false);
+    setReadyEquations(new Set());
+    void Promise.resolve(onClearWhiteboard?.()).finally(() => {
+      window.location.reload();
+    });
+  }, [clearSession, onClearWhiteboard]);
 
   // Get last assistant message text for TTS
   const lastAssistantMsg = [...messages]
@@ -285,15 +411,21 @@ export function ChatPanel({
     <TooltipProvider>
       <div className="flex h-full flex-col overflow-hidden">
         {/* Header */}
-        <div className="flex flex-shrink-0 items-center justify-between px-4 py-3 border-b border-border">
-          <div>
+        <div className="flex flex-shrink-0 flex-wrap items-start justify-between gap-2 px-4 py-3 border-b border-border">
+          <div className="min-w-0 shrink">
             <h1 className="text-sm font-semibold">Stepwise</h1>
             <p className="text-xs text-muted-foreground">
               {provider === "gemma" ? "Gemma 4 · Vision enabled" : "AI Tutor"}
             </p>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
             <TextSpeedSlider value={textSpeed} onChange={handleTextSpeedChange} />
+            {latexFontSize !== undefined && onLatexFontSizeChange && (
+              <LatexFontSizeSlider
+                value={latexFontSize}
+                onChange={onLatexFontSizeChange}
+              />
+            )}
             <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -302,6 +434,7 @@ export function ChatPanel({
                 size="icon"
                 onClick={handleClear}
                 aria-label="Clear chat history"
+                className="h-9 w-9 flex-shrink-0"
               >
                 <Trash2 className="h-4 w-4 text-muted-foreground" />
               </Button>
@@ -321,6 +454,9 @@ export function ChatPanel({
           textSpeed={textSpeed}
           focusEquation={focusEquation}
           onRevealedText={setRevealedText}
+          revealPaused={revealPaused}
+          readyEquations={readyEquations}
+          onCatchingUpChange={setIsCatchingUpReveal}
         />
 
         {/* Rate limit error banner */}
@@ -379,8 +515,8 @@ export function ChatPanel({
           value={input}
           onChange={setInput}
           onSubmit={handleSubmit}
-          onStop={stop}
-          isLoading={isLoading}
+          onStop={handleStopGeneration}
+          isLoading={isLoading || revealPaused || isCatchingUpReveal}
           voice={voice}
           files={files}
           onFilesChange={setFiles}

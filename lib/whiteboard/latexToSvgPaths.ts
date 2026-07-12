@@ -95,22 +95,30 @@ export function parseSvgPaths(svgString: string): ParsedSvgPaths {
 }
 
 /**
- * Estimates canvas shape dimensions from the MathJax SVG viewBox.
- * Scales the equation to a target width of 400 canvas units.
+ * Estimates canvas shape dimensions from the MathJax SVG viewBox using a
+ * fixed font size so every equation shares the same glyph scale.
+ *
+ * Previously we forced a constant *width* (400px), which made short equations
+ * huge and long ones tiny. Scaling by `fontSize / MATHJAX_EM_UNITS` keeps the
+ * type size consistent; only the block bounds grow with content.
+ *
+ * @param fontSize Approximate canvas pixels for a 1em MathJax line.
  */
 export function estimateShapeDimensions(
   viewBox: string,
-  targetWidth = 400
+  fontSize = 40
 ): { w: number; h: number } {
+  const MATHJAX_EM_UNITS = 1000;
   const parts = viewBox.split(/\s+/).map(Number);
   if (parts.length < 4 || parts.some(isNaN)) {
-    return { w: targetWidth, h: 100 };
+    return { w: fontSize * 4, h: fontSize + 8 };
   }
 
   const [, , vw, vh] = parts;
-  if (!vw || !vh) return { w: targetWidth, h: 100 };
+  if (!vw || !vh) return { w: fontSize * 4, h: fontSize + 8 };
 
-  const scale = targetWidth / vw;
-  const h = Math.max(Math.ceil(vh * scale) + 16, 40);
-  return { w: targetWidth, h };
+  const scale = fontSize / MATHJAX_EM_UNITS;
+  const w = Math.max(Math.ceil(vw * scale), 24);
+  const h = Math.max(Math.ceil(vh * scale) + 8, 24);
+  return { w, h };
 }

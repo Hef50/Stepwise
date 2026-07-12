@@ -55,6 +55,10 @@ export interface LatexAnimatedShapeProps {
   w: number;
   /** Shape height in canvas units */
   h: number;
+  /** When true, play stroke-draw animation once then settle to filled */
+  animate: boolean;
+  /** Per-path draw duration (ms) baked at creation; 0 = no animation */
+  stepMs: number;
 }
 
 // ─── Chat / Persistence ───────────────────────────────────────────────────────

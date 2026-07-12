@@ -51,10 +51,27 @@ const MODE_STORAGE_KEY = "stepwise_mode";
 
 export function AppShell() {
   const { editorRef, capture } = useWhiteboardCapture();
-  const { renderLatex, focusLatexShape } = useWhiteboardMath(editorRef);
+  const {
+    renderLatex,
+    focusLatexShape,
+    latexFontSize,
+    setLatexFontSize,
+    clearWhiteboard,
+  } = useWhiteboardMath(editorRef);
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH);
   const [mode, setMode] = useState<AppMode>("text");
   const [activeModel, setActiveModel] = useState<ActiveModel>("llm7");
+  /** Only one Tldraw instance may mount — both share the same persistenceKey. */
+  const [isLargeScreen, setIsLargeScreen] = useState(true);
+  const [editorReady, setEditorReady] = useState(false);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const sync = () => setIsLargeScreen(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
 
   // Restore persisted mode after hydration (client-only, avoids SSR mismatch)
   useEffect(() => {
@@ -93,6 +110,7 @@ export function AppShell() {
   const handleEditorReady = useCallback(
     (editor: Editor) => {
       editorRef.current = editor;
+      setEditorReady(true);
     },
     [editorRef]
   );
@@ -143,6 +161,10 @@ export function AppShell() {
         captureWhiteboard={capture}
         renderLatexOnCanvas={renderLatex}
         focusLatexShape={focusLatexShape}
+        latexFontSize={latexFontSize}
+        onLatexFontSizeChange={setLatexFontSize}
+        onClearWhiteboard={clearWhiteboard}
+        editorReady={editorReady}
         onActiveModelChange={setActiveModel}
       />
     );
@@ -217,7 +239,9 @@ export function AppShell() {
 
           {/* Whiteboard — fills remaining space */}
           <div className="relative flex-1 overflow-hidden">
-            <WhiteboardPanel onEditorReady={handleEditorReady} />
+            {isLargeScreen && (
+              <WhiteboardPanel onEditorReady={handleEditorReady} />
+            )}
           </div>
         </div>
       </div>
@@ -259,7 +283,9 @@ export function AppShell() {
             value="board"
             className="relative flex-1 overflow-hidden mt-0"
           >
-            <WhiteboardPanel onEditorReady={handleEditorReady} />
+            {!isLargeScreen && (
+              <WhiteboardPanel onEditorReady={handleEditorReady} />
+            )}
           </TabsContent>
         </Tabs>
       </div>

@@ -4,6 +4,7 @@ import { useCallback } from "react";
 import { Tldraw, type Editor } from "@tldraw/tldraw";
 import "@tldraw/tldraw/tldraw.css";
 import { LatexAnimatedShapeUtil } from "./shapes/LatexAnimatedShapeUtil";
+import { WHITEBOARD_PERSISTENCE_KEY } from "@/hooks/useWhiteboardMath";
 
 const CUSTOM_SHAPE_UTILS = [LatexAnimatedShapeUtil] as const;
 
@@ -22,6 +23,7 @@ export default function Whiteboard({ onEditorReady }: WhiteboardProps) {
   return (
     <div className="absolute inset-0">
       <Tldraw
+        persistenceKey={WHITEBOARD_PERSISTENCE_KEY}
         shapeUtils={CUSTOM_SHAPE_UTILS}
         onMount={handleMount}
       />

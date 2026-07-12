@@ -4,9 +4,11 @@ import { useState, useEffect } from "react";
 import {
   BaseBoxShapeUtil,
   HTMLContainer,
+  useEditor,
   type TLBaseShape,
 } from "@tldraw/tldraw";
 import type { SvgPathData } from "@/lib/types";
+import { notifyLatexAnimationComplete } from "@/lib/whiteboard/latexAnimationBridge";
 
 // ─── Inline prop validators ────────────────────────────────────────────────────
 // Satisfy tldraw's Validatable<T> interface without importing @tldraw/validate
@@ -24,11 +26,26 @@ function mkString(): Validatable<string> {
   };
 }
 
-function mkNumber(): Validatable<number> {
+function mkNumber(defaultValue?: number): Validatable<number> {
   return {
     validate(v) {
+      if ((v === undefined || v === null) && defaultValue !== undefined) {
+        return defaultValue;
+      }
       if (typeof v !== "number")
         throw new TypeError(`Expected number, got ${typeof v}`);
+      return v;
+    },
+  };
+}
+
+/** Coerces missing/null to `defaultValue` so older persisted shapes still load. */
+function mkBoolean(defaultValue = false): Validatable<boolean> {
+  return {
+    validate(v) {
+      if (v === undefined || v === null) return defaultValue;
+      if (typeof v !== "boolean")
+        throw new TypeError(`Expected boolean, got ${typeof v}`);
       return v;
     },
   };
@@ -46,7 +63,9 @@ function mkArrayOfSvgPath(): Validatable<SvgPathData[]> {
           throw new TypeError(`svgPaths[${i}].d must be a string`);
         const t = obj.transform;
         if (t !== undefined && t !== null && typeof t !== "string")
-          throw new TypeError(`svgPaths[${i}].transform must be a string or undefined`);
+          throw new TypeError(
+            `svgPaths[${i}].transform must be a string or undefined`
+          );
         return {
           d: obj.d,
           transform: typeof t === "string" ? t : undefined,
@@ -74,6 +93,17 @@ interface LatexAnimatedProps {
   viewBox: string;
   w: number;
   h: number;
+  /**
+   * When true, play the stroke-draw animation once, then settle to filled
+   * and flip this flag to false so remounts / refresh don't re-animate.
+   */
+  animate: boolean;
+  /**
+   * Per-path draw duration (ms) baked in at creation from the reading-speed
+   * slider. 0 = skip stroke animation. Changing the slider later must NOT
+   * mutate this — only new shapes pick up the new speed.
+   */
+  stepMs: number;
 }
 
 export type LatexAnimatedShape = TLBaseShape<
@@ -81,17 +111,13 @@ export type LatexAnimatedShape = TLBaseShape<
   LatexAnimatedProps
 >;
 
-// ─── Animation Constants ──────────────────────────────────────────────────────
-
-/** Duration of the draw animation for each individual path (ms) */
-const STEP_MS = 80;
-
 /**
  * Maximum number of paths to animate sequentially.
- * Complex equations with more paths than this render statically to
- * avoid unacceptably long animation durations.
+ * Complex equations with more paths than this render statically.
  */
 const MAX_ANIMATED = 200;
+
+const FALLBACK_STEP_MS = 200;
 
 // ─── Renderer Component ───────────────────────────────────────────────────────
 
@@ -100,32 +126,57 @@ interface RendererProps {
 }
 
 function LatexAnimatedRenderer({ shape }: RendererProps) {
-  const { svgPaths, viewBox, w, h } = shape.props;
+  const editor = useEditor();
+  const { svgPaths, viewBox, w, h, animate, stepMs } = shape.props;
 
   // MathJax glyph paths live in a large coordinate space (viewBox width can be
-  // thousands of units) that the SVG scales down to `w`. A fixed strokeWidth in
-  // those units renders as a fraction of a pixel. Derive the stroke from the
-  // viewBox so the on-screen pen width stays visible and consistent (~2px):
-  //   onScreenPx = strokeWidth * (w / viewBoxWidth)  ⇒  strokeWidth = viewBoxWidth / (w / 2)
+  // thousands of units) that the SVG scales down to `w`. Derive stroke width
+  // so the on-screen pen stays ~2px.
   const viewBoxWidth = Number(viewBox.split(/\s+/)[2] ?? "0") || w;
   const strokeWidth = viewBoxWidth / (w / 2);
 
-  const shouldAnimate = svgPaths.length > 0 && svgPaths.length <= MAX_ANIMATED;
-  const totalMs = shouldAnimate ? svgPaths.length * STEP_MS : 0;
+  const effectiveStepMs =
+    typeof stepMs === "number" && stepMs > 0 ? stepMs : FALLBACK_STEP_MS;
 
-  const [drawn, setDrawn] = useState(!shouldAnimate);
+  const canAnimate =
+    animate &&
+    stepMs > 0 &&
+    svgPaths.length > 0 &&
+    svgPaths.length <= MAX_ANIMATED;
 
+  const totalMs = canAnimate ? svgPaths.length * effectiveStepMs : 0;
+
+  const [drawn, setDrawn] = useState(!canAnimate);
+
+  // Depend only on shape.id + animate. stepMs is baked into the shape at
+  // creation — changing the reading-speed slider must not restart this draw.
   useEffect(() => {
-    if (!shouldAnimate) {
+    if (!canAnimate) {
       setDrawn(true);
+      // Restored / instant shapes: unblock any waiter immediately
+      notifyLatexAnimationComplete(shape.id);
       return;
     }
-    // Reset animation state if shape props change (new equation placed)
+
     setDrawn(false);
-    const t = setTimeout(() => setDrawn(true), totalMs + 300);
+    const settleMs = totalMs + Math.max(effectiveStepMs, 200);
+    const t = setTimeout(() => {
+      setDrawn(true);
+      try {
+        editor.updateShape({
+          id: shape.id,
+          type: AI_LATEX_ANIMATED_TYPE,
+          props: { animate: false },
+        });
+      } catch {
+        // Shape may have been deleted mid-animation
+      }
+      notifyLatexAnimationComplete(shape.id);
+    }, settleMs);
+
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shape.id, svgPaths.length, totalMs]);
+  }, [shape.id, animate]);
 
   if (svgPaths.length === 0) {
     return (
@@ -180,8 +231,8 @@ function LatexAnimatedRenderer({ shape }: RendererProps) {
               strokeDasharray={1}
               style={{
                 strokeDashoffset: 1,
-                animation: `tl-draw-path ${STEP_MS}ms linear forwards`,
-                animationDelay: `${i * STEP_MS}ms`,
+                animation: `tl-draw-path ${effectiveStepMs}ms linear forwards`,
+                animationDelay: `${i * effectiveStepMs}ms`,
               }}
             />
           )
@@ -202,6 +253,9 @@ export class LatexAnimatedShapeUtil extends BaseBoxShapeUtil<LatexAnimatedShape>
     w: mkNumber(),
     h: mkNumber(),
     svgPaths: mkArrayOfSvgPath(),
+    animate: mkBoolean(false),
+    // Default 0 for shapes persisted before stepMs existed → treat as settled
+    stepMs: mkNumber(0),
   };
 
   override getDefaultProps(): LatexAnimatedProps {
@@ -211,6 +265,8 @@ export class LatexAnimatedShapeUtil extends BaseBoxShapeUtil<LatexAnimatedShape>
       viewBox: "0 0 100 40",
       w: 400,
       h: 100,
+      animate: false,
+      stepMs: 0,
     };
   }
 
