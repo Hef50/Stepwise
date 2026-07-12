@@ -8,6 +8,7 @@ import {
   type Session,
 } from "@google/genai";
 import type { VoiceTranscriptEntry } from "@/lib/types";
+import { dataUrlMimeType, dataUrlToBase64 } from "@/lib/speech";
 
 type LiveStatus = "idle" | "connecting" | "connected" | "muted" | "error";
 
@@ -23,6 +24,10 @@ export interface GeminiLiveState {
   outputCaption: string;
   error: string | null;
   transcriptHistory: VoiceTranscriptEntry[];
+  /** Increments after each completed conversation turn. */
+  turnCount: number;
+  /** Set when the latest whiteboard frame was sent to the session. */
+  whiteboardSyncedAt: string | null;
 }
 
 export interface GeminiLiveControls {
@@ -31,6 +36,7 @@ export interface GeminiLiveControls {
   disconnect: () => void;
   toggleMute: () => Promise<void>;
   sendTextContext: (text: string) => Promise<void>;
+  sendWhiteboardFrame: (imageDataUrl: string) => Promise<void>;
 }
 
 const INPUT_SAMPLE_RATE = 16000;
@@ -103,6 +109,8 @@ export function useGeminiLive(): GeminiLiveControls {
     outputCaption: "",
     error: null,
     transcriptHistory: [],
+    turnCount: 0,
+    whiteboardSyncedAt: null,
   });
 
   const sessionRef = useRef<Session | null>(null);
@@ -114,6 +122,7 @@ export function useGeminiLive(): GeminiLiveControls {
   const playbackTimeRef = useRef(0);
   const inputFinalRef = useRef("");
   const outputFinalRef = useRef("");
+  const manualDisconnectRef = useRef(false);
 
   const appendTranscript = useCallback(
     (role: VoiceTranscriptEntry["role"], text: string) => {
@@ -127,7 +136,7 @@ export function useGeminiLive(): GeminiLiveControls {
     []
   );
 
-  const stopMic = useCallback(() => {
+  const stopMic = useCallback((sendAudioStreamEnd = true) => {
     processorRef.current?.disconnect();
     sourceRef.current?.disconnect();
     silentGainRef.current?.disconnect();
@@ -136,7 +145,13 @@ export function useGeminiLive(): GeminiLiveControls {
     sourceRef.current = null;
     silentGainRef.current = null;
     micStreamRef.current = null;
-    sessionRef.current?.sendRealtimeInput({ audioStreamEnd: true });
+    if (sendAudioStreamEnd) {
+      try {
+        sessionRef.current?.sendRealtimeInput({ audioStreamEnd: true });
+      } catch {
+        // The socket can already be closing; local microphone cleanup still succeeded.
+      }
+    }
   }, []);
 
   const playPcmAudio = useCallback((base64: string) => {
@@ -194,6 +209,12 @@ export function useGeminiLive(): GeminiLiveControls {
         appendTranscript("assistant", outputFinalRef.current);
         inputFinalRef.current = "";
         outputFinalRef.current = "";
+        setState((prev) => ({
+          ...prev,
+          inputCaption: "",
+          outputCaption: "",
+          turnCount: prev.turnCount + 1,
+        }));
       }
     },
     [appendTranscript, playPcmAudio]
@@ -202,6 +223,7 @@ export function useGeminiLive(): GeminiLiveControls {
   const connect = useCallback(async () => {
     if (sessionRef.current || state.status === "connecting") return;
 
+    manualDisconnectRef.current = false;
     setState((prev) => ({ ...prev, status: "connecting", error: null }));
 
     try {
@@ -227,26 +249,45 @@ export function useGeminiLive(): GeminiLiveControls {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
+          systemInstruction:
+            "You are Stepwise, a warm expert AI teaching assistant in a live office-hours call. The student may share their whiteboard as video frames — carefully read every equation, variable, diagram, and written work shown there and use it as the primary source of truth for the problem they are working on. Keep answers concise, conversational, and educational. Ask a short follow-up question when it helps the student keep moving.",
         },
         callbacks: {
           onopen: () => {
-            setState((prev) => ({ ...prev, status: "muted", muted: true, error: null }));
+            setState((prev) => ({
+              ...prev,
+              status: micStreamRef.current ? "connected" : "muted",
+              muted: !micStreamRef.current,
+              error: null,
+            }));
           },
           onmessage: handleMessage,
           onerror: (event) => {
+            const detail =
+              event.message ||
+              (event.error instanceof Error ? event.error.message : null) ||
+              "Gemini Live connection error.";
             setState((prev) => ({
               ...prev,
               status: "error",
-              error: event.message || "Gemini Live connection error.",
+              muted: true,
+              error: detail,
             }));
           },
-          onclose: () => {
-            stopMic();
+          onclose: (event) => {
+            const wasManualDisconnect = manualDisconnectRef.current;
+            manualDisconnectRef.current = false;
+            stopMic(false);
             sessionRef.current = null;
             setState((prev) => ({
               ...prev,
-              status: prev.status === "error" ? "error" : "idle",
+              status: wasManualDisconnect ? "idle" : "error",
               muted: true,
+              error: wasManualDisconnect
+                ? null
+                : prev.error ??
+                  event.reason ??
+                  `Gemini Live call closed unexpectedly${event.code ? ` (${event.code})` : ""}.`,
             }));
           },
         },
@@ -305,7 +346,7 @@ export function useGeminiLive(): GeminiLiveControls {
   const toggleMute = useCallback(async () => {
     if (!sessionRef.current) {
       await connect();
-      return;
+      if (!sessionRef.current) return;
     }
 
     if (micStreamRef.current) {
@@ -340,16 +381,52 @@ export function useGeminiLive(): GeminiLiveControls {
     sessionRef.current?.sendRealtimeInput({ text: trimmed });
   }, [connect]);
 
+  const sendWhiteboardFrame = useCallback(async (imageDataUrl: string) => {
+    const trimmed = imageDataUrl.trim();
+    if (!trimmed) return;
+
+    if (!sessionRef.current) {
+      await connect();
+    }
+
+    sessionRef.current?.sendRealtimeInput({
+      video: {
+        data: dataUrlToBase64(trimmed),
+        mimeType: dataUrlMimeType(trimmed),
+      },
+    });
+
+    setState((prev) => ({
+      ...prev,
+      whiteboardSyncedAt: new Date().toISOString(),
+    }));
+  }, [connect]);
+
   const disconnect = useCallback(() => {
+    manualDisconnectRef.current = true;
     stopMic();
-    sessionRef.current?.close();
+    try {
+      sessionRef.current?.close();
+    } catch {
+      // The Live service may already have closed the session.
+    }
     sessionRef.current = null;
     void audioContextRef.current?.close();
     audioContextRef.current = null;
-    setState((prev) => ({ ...prev, status: "idle", muted: true }));
+    inputFinalRef.current = "";
+    outputFinalRef.current = "";
+    setState((prev) => ({
+      ...prev,
+      status: "idle",
+      muted: true,
+      inputCaption: "",
+      outputCaption: "",
+      turnCount: 0,
+      whiteboardSyncedAt: null,
+    }));
   }, [stopMic]);
 
   useEffect(() => disconnect, [disconnect]);
 
-  return { state, connect, disconnect, toggleMute, sendTextContext };
+  return { state, connect, disconnect, toggleMute, sendTextContext, sendWhiteboardFrame };
 }

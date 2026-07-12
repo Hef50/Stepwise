@@ -27,8 +27,8 @@ interface ChatInputProps {
   files: UploadedFile[];
   onFilesChange: (files: UploadedFile[]) => void;
   onCaptureWhiteboard: () => void;
-  lastAssistantMessage?: string;
   interactionMode: InteractionMode;
+  latestAssistantText?: string;
 }
 
 export function ChatInput({
@@ -41,8 +41,8 @@ export function ChatInput({
   files,
   onFilesChange,
   onCaptureWhiteboard,
-  lastAssistantMessage,
   interactionMode,
+  latestAssistantText,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -70,6 +70,12 @@ export function ChatInput({
     <form onSubmit={onSubmit} className="flex flex-col gap-2 border-t border-border bg-background p-3">
       {voice.state.error && (
         <p className="px-1 text-xs text-destructive">{voice.state.error}</p>
+      )}
+
+      {interactionMode === "mixed" && voice.state.ttsStatus && (
+        <p className="px-1 text-xs text-muted-foreground">
+          Voice: {voice.state.ttsStatus}
+        </p>
       )}
 
       {files.length > 0 && (
@@ -134,7 +140,7 @@ export function ChatInput({
 
         <div className="flex flex-shrink-0 items-center gap-1">
           {voiceEnabled && (
-            <VoiceControls voice={voice} lastAssistantMessage={lastAssistantMessage} />
+            <VoiceControls voice={voice} textToRead={latestAssistantText} />
           )}
           {isLoading ? (
             <Button

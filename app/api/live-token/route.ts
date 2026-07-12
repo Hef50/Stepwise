@@ -1,6 +1,6 @@
 import { GoogleGenAI, Modality } from "@google/genai";
 
-const LIVE_MODEL = "gemini-3.1-flash-live-preview";
+const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL ?? "gemini-3.1-flash-live-preview";
 
 function getGeminiApiKey(): string | null {
   return process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? null;
@@ -24,27 +24,41 @@ export async function POST(): Promise<Response> {
     httpOptions: { apiVersion: "v1alpha" },
   });
 
-  const token = await ai.authTokens.create({
-    config: {
-      uses: 1,
-      newSessionExpireTime: new Date(Date.now() + 60_000).toISOString(),
-      expireTime: new Date(Date.now() + 30 * 60_000).toISOString(),
-      liveConnectConstraints: {
-        model: LIVE_MODEL,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          systemInstruction:
-            "You are Stepwise, a warm expert AI teaching assistant in a live office-hours call. Keep answers concise, conversational, and educational. Ask a short follow-up question when it helps the student keep moving.",
+  try {
+    const token = await ai.authTokens.create({
+      config: {
+        httpOptions: { apiVersion: "v1alpha" },
+        uses: 1,
+        newSessionExpireTime: new Date(Date.now() + 60_000).toISOString(),
+        expireTime: new Date(Date.now() + 30 * 60_000).toISOString(),
+        liveConnectConstraints: {
+          model: LIVE_MODEL,
+          config: {
+            responseModalities: [Modality.AUDIO],
+            inputAudioTranscription: {},
+            outputAudioTranscription: {},
+            systemInstruction:
+              "You are Stepwise, a warm expert AI teaching assistant in a live office-hours call. The student may share their whiteboard as video frames. Carefully read every equation, variable, diagram, and written step shown there and use the whiteboard as the primary source of truth for the problem they are working on. Keep answers concise, conversational, and educational. Ask a short follow-up question when it helps the student keep moving.",
+          },
         },
+        lockAdditionalFields: ["responseModalities"],
       },
-      lockAdditionalFields: ["responseModalities"],
-    },
-  });
+    });
 
-  return Response.json({
-    token: token.name,
-    model: LIVE_MODEL,
-  });
+    return Response.json({
+      token: token.name,
+      model: LIVE_MODEL,
+    });
+  } catch (err) {
+    console.error("[live-token] Gemini auth token error:", err);
+    return Response.json(
+      {
+        error:
+          err instanceof Error
+            ? `Gemini Live token creation failed: ${err.message}`
+            : "Gemini Live token creation failed.",
+      },
+      { status: 500 }
+    );
+  }
 }

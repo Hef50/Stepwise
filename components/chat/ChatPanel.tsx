@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useCallback, useEffect, type FormEvent } from "react";
+import { useRef, useState, useCallback, useEffect, useMemo, type FormEvent } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { MessageCircle, Mic2, Settings, Trash2, Type } from "lucide-react";
@@ -26,6 +26,8 @@ interface ChatPanelProps {
   captureWhiteboard: () => Promise<CanvasPayload | null>;
 }
 
+const WHITEBOARD_VISION_PROMPT = `Analyze the provided whiteboard image for an AI tutor in a live session. Identify every equation, variable, symbol, diagram, graph, and written work shown. Transcribe mathematical notation exactly as written. Do not solve the problem yet; provide concise visual context the tutor can use to answer the student's question.`;
+
 async function analyzeVisualContext(
   question: string,
   images: string[]
@@ -36,9 +38,7 @@ async function analyzeVisualContext(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      prompt: `The student is asking: "${question}"
-
-Analyze the provided image(s) for an AI tutor. The first image is the current whiteboard when present; any remaining images are attachments. Identify the problem, notation, diagrams, equations, and relevant work shown. Do not solve the problem yet; provide concise visual context the tutor can use to answer the student's question.`,
+      prompt: `${WHITEBOARD_VISION_PROMPT}\n\nStudent context: "${question}"`,
       images,
     }),
   });
@@ -53,9 +53,14 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isPreparingContext, setIsPreparingContext] = useState(false);
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("text");
-  const lastSpokenAssistantRef = useRef<string | null>(null);
+  const lastWhiteboardCaptureRef = useRef<string | null>(null);
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
   const live = useGeminiLive();
+  const {
+    disconnect: disconnectLive,
+    sendWhiteboardFrame,
+    state: liveState,
+  } = live;
 
   // Always start with empty messages so server and client render the same
   // initial HTML. Persisted messages are restored client-side in useEffect.
@@ -111,7 +116,7 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
       submitText(transcript);
     }, 80);
   });
-  const { cancelSpeech, speak, stopListening } = voice;
+  const { cancelSpeech, preloadSpeech, stopListening } = voice;
 
   useEffect(() => {
     if (interactionMode !== "mixed") {
@@ -119,6 +124,13 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
       stopListening();
     }
   }, [cancelSpeech, interactionMode, stopListening]);
+
+  useEffect(() => {
+    if (interactionMode !== "audio") {
+      disconnectLive();
+      lastWhiteboardCaptureRef.current = null;
+    }
+  }, [disconnectLive, interactionMode]);
 
   // Restore persisted messages after hydration (client-only)
   useEffect(() => {
@@ -150,59 +162,66 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
     [input, submitText]
   );
 
-  useEffect(() => {
-    const lastAssistantMessage = [...messages]
+  const latestAssistantText = useMemo(() => {
+    const latestAssistantMessage = [...messages]
       .reverse()
       .find((message) => message.role === "assistant");
-    const lastAssistantText = lastAssistantMessage?.parts
+
+    return latestAssistantMessage?.parts
       .filter((part) => part.type === "text")
       .map((part) => (part.type === "text" ? part.text : ""))
       .join("") ?? "";
+  }, [messages]);
 
+  useEffect(() => {
     if (
       interactionMode !== "mixed" ||
       isGenerating ||
       isPreparingContext ||
-      !lastAssistantText ||
-      !voice.state.supported
+      !latestAssistantText
     ) {
       return;
     }
 
-    const assistantId = lastAssistantMessage?.id ?? null;
-    if (assistantId && assistantId === lastSpokenAssistantRef.current) {
-      return;
-    }
-
-    lastSpokenAssistantRef.current = assistantId;
-    speak(lastAssistantText);
+    preloadSpeech(latestAssistantText);
   }, [
     interactionMode,
     isGenerating,
     isPreparingContext,
-    messages,
-    speak,
-    voice.state.supported,
+    latestAssistantText,
+    preloadSpeech,
   ]);
 
+  const shareWhiteboardWithLive = useCallback(
+    async (includeVisionText = true): Promise<string | null> => {
+      const payload = await captureWhiteboard();
+      if (!payload?.imageDataUrl) return null;
+
+      const captureKey = payload.capturedAt;
+      const isNewCapture = captureKey !== lastWhiteboardCaptureRef.current;
+      if (!isNewCapture && !includeVisionText) return null;
+
+      lastWhiteboardCaptureRef.current = captureKey;
+      await sendWhiteboardFrame(payload.imageDataUrl);
+
+      return "Whiteboard frame sent";
+    },
+    [captureWhiteboard, sendWhiteboardFrame]
+  );
+
   const getWhiteboardAnalysis = useCallback(async (): Promise<string | null> => {
+    if (interactionMode === "audio") {
+      return shareWhiteboardWithLive(true);
+    }
+
     const payload = await captureWhiteboard();
     if (!payload?.imageDataUrl) return null;
 
-    const res = await fetch("/api/vision", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt:
-          "Analyze what is drawn on this whiteboard. Describe the content clearly so the AI tutor can reference it in the conversation.",
-        images: [payload.imageDataUrl],
-      }),
-    });
-
-    if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
-    const data = (await res.json()) as { analysis?: string };
-    return data.analysis?.trim() ?? null;
-  }, [captureWhiteboard]);
+    return analyzeVisualContext(
+      "Please analyze the whiteboard.",
+      [payload.imageDataUrl]
+    );
+  }, [captureWhiteboard, interactionMode, shareWhiteboardWithLive]);
 
   const handleCaptureWhiteboard = useCallback(async () => {
     try {
@@ -218,6 +237,41 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
     }
   }, [getWhiteboardAnalysis, sendMessage]);
 
+  const isAudioCallActive =
+    interactionMode === "audio" &&
+    (liveState.status === "connected" || liveState.status === "muted");
+
+  useEffect(() => {
+    if (!isAudioCallActive) return;
+
+    let cancelled = false;
+
+    const syncWhiteboard = async (includeVisionText: boolean) => {
+      if (cancelled) return;
+      try {
+        await shareWhiteboardWithLive(includeVisionText);
+      } catch (err) {
+        console.error("[ChatPanel] Live whiteboard sync error:", err);
+      }
+    };
+
+    void syncWhiteboard(true);
+
+    const interval = window.setInterval(() => {
+      void syncWhiteboard(false);
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isAudioCallActive, shareWhiteboardWithLive]);
+
+  useEffect(() => {
+    if (!isAudioCallActive || liveState.turnCount === 0) return;
+    void shareWhiteboardWithLive(true);
+  }, [isAudioCallActive, liveState.turnCount, shareWhiteboardWithLive]);
+
   const handleDeleteMessage = useCallback(
     (id: string) => {
       setMessages((prev) => prev.filter((m) => m.id !== id));
@@ -229,16 +283,6 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
     clearSession();
     window.location.reload();
   }, [clearSession]);
-
-  // Get last assistant message text for TTS
-  const lastAssistantMsg = [...messages]
-    .reverse()
-    .find((m) => m.role === "assistant");
-  const lastAssistantText =
-    lastAssistantMsg?.parts
-      .filter((p) => p.type === "text")
-      .map((p) => (p.type === "text" ? p.text : ""))
-      .join("") ?? undefined;
 
   return (
     <TooltipProvider>
@@ -343,8 +387,8 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
               files={files}
               onFilesChange={setFiles}
               onCaptureWhiteboard={handleCaptureWhiteboard}
-              lastAssistantMessage={lastAssistantText}
               interactionMode={interactionMode}
+              latestAssistantText={latestAssistantText}
             />
           </>
         )}

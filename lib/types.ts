@@ -42,7 +42,14 @@ export interface VoiceState {
   transcript: string;
   captions: string;
   error: string | null;
+  /** @deprecated Use sttSupported and ttsSupported instead. */
   supported: boolean;
+  sttSupported: boolean;
+  ttsSupported: boolean;
+  /** Latest browser text-to-speech diagnostic for mixed mode. */
+  ttsStatus: string | null;
+  /** When false, assistant responses are not read aloud (mixed mode mute). */
+  soundEnabled: boolean;
   nativeVoiceModeEnabled: boolean;
   transcriptHistory: VoiceTranscriptEntry[];
   voiceSpeed: number;
@@ -53,7 +60,9 @@ export interface VoiceControls {
   startListening: () => void;
   stopListening: () => void;
   speak: (text: string) => void;
+  preloadSpeech: (text: string) => void;
   cancelSpeech: () => void;
+  toggleSound: () => void;
   toggleNativeVoiceMode: () => void;
   setVoiceSpeed: (speed: number) => void;
   clearTranscriptHistory: () => void;

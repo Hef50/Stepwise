@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { loadSettings, saveSettings } from "@/lib/settings";
+import { stripMarkdownForSpeech } from "@/lib/speech";
 import type { VoiceControls, VoiceState, VoiceTranscriptEntry } from "@/lib/types";
 
 /**
@@ -11,7 +12,8 @@ import type { VoiceControls, VoiceState, VoiceTranscriptEntry } from "@/lib/type
  * The public interface (VoiceControls) is deliberately abstract so this
  * implementation can be replaced with OpenAI Whisper/TTS without touching any
  * component that consumes it.
- */
+
+*/
 
 const isBrowser = typeof window !== "undefined";
 
@@ -30,6 +32,13 @@ type SpeechRecognitionLike = {
 };
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+interface SpeechAudio {
+  audioUrl: string;
+  mimeType: string;
+  model?: string;
+  text: string;
+}
 
 function getSpeechRecognitionClass(): SpeechRecognitionConstructor | undefined {
   if (!isBrowser) return undefined;
@@ -56,37 +65,112 @@ function createTranscriptEntry(
   };
 }
 
+function splitSpeechIntoChunks(text: string): string[] {
+  const maxLength = 180;
+  const sentences = text
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .filter(Boolean);
+  const chunks: string[] = [];
+
+  for (const sentence of sentences.length > 0 ? sentences : [text]) {
+    if (sentence.length <= maxLength) {
+      chunks.push(sentence);
+      continue;
+    }
+
+    for (let i = 0; i < sentence.length; i += maxLength) {
+      chunks.push(sentence.slice(i, i + maxLength));
+    }
+  }
+
+  return chunks;
+}
+
+function base64ToBlobUrl(base64: string, mimeType: string): string {
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+}
+
+function normalizeSpeechText(text: string): string {
+  return stripMarkdownForSpeech(text).slice(0, 4000);
+}
+
 export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): VoiceControls {
-  const [state, setState] = useState<VoiceState>(() => {
-    const settings = isBrowser ? loadSettings() : null;
-    return {
-      mode: "idle",
-      transcript: "",
-      captions: "",
-      error: null,
-      supported: false,
-      nativeVoiceModeEnabled: true,
-      transcriptHistory: [],
-      voiceSpeed: settings?.talkingSpeed ?? 1,
-    };
-  });
+  const settings = isBrowser ? loadSettings() : null;
+
+  const [state, setState] = useState<VoiceState>(() => ({
+    mode: "idle",
+    transcript: "",
+    captions: "",
+    error: null,
+    supported: false,
+    sttSupported: false,
+    ttsSupported: false,
+    ttsStatus: null,
+    soundEnabled: true,
+    nativeVoiceModeEnabled: true,
+    transcriptHistory: [],
+    voiceSpeed: settings?.talkingSpeed ?? 1,
+  }));
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const utteranceQueueRef = useRef<SpeechSynthesisUtterance[]>([]);
+  const audioElementRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+  const cachedAudioRef = useRef<SpeechAudio | null>(null);
+  const preloadRequestRef = useRef<string | null>(null);
   const finalTranscriptRef = useRef<string>("");
   const errorTimerRef = useRef<unknown>(null);
   const silenceTimerRef = useRef<unknown>(null);
+  const speechStartTimerRef = useRef<number | null>(null);
   const finalizingRef = useRef(false);
   const nativeVoiceModeRef = useRef(state.nativeVoiceModeEnabled);
+  const soundEnabledRef = useRef(state.soundEnabled);
 
   useEffect(() => {
     nativeVoiceModeRef.current = state.nativeVoiceModeEnabled;
   }, [state.nativeVoiceModeEnabled]);
 
   useEffect(() => {
-    const supported =
-      getSpeechRecognitionClass() !== undefined && isSpeechSynthesisSupported();
-    setState((prev) => ({ ...prev, supported }));
+    soundEnabledRef.current = state.soundEnabled;
+  }, [state.soundEnabled]);
+
+  useEffect(() => {
+    const sttSupported = getSpeechRecognitionClass() !== undefined;
+    const ttsSupported = isSpeechSynthesisSupported();
+    setState((prev) => ({
+      ...prev,
+      sttSupported,
+      ttsSupported,
+      supported: sttSupported && ttsSupported,
+      ttsStatus: ttsSupported
+        ? `Browser TTS ready; voices loaded: ${window.speechSynthesis.getVoices().length}`
+        : "Browser TTS is not supported here.",
+    }));
+  }, []);
+
+  useEffect(() => {
+    if (!isSpeechSynthesisSupported()) return;
+
+    const loadVoices = () => {
+      const voices = window.speechSynthesis.getVoices();
+      setState((prev) => ({
+        ...prev,
+        ttsStatus: `Browser TTS ready; voices loaded: ${voices.length}`,
+      }));
+    };
+
+    loadVoices();
+    window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
+    return () => {
+      window.speechSynthesis.removeEventListener("voiceschanged", loadVoices);
+    };
   }, []);
 
   const clearSilenceTimer = useCallback(() => {
@@ -94,6 +178,14 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       clearTimeout(silenceTimerRef.current as ReturnType<typeof setTimeout>);
       silenceTimerRef.current = null;
     }
+  }, []);
+
+  const clearCachedAudio = useCallback(() => {
+    const cachedAudio = cachedAudioRef.current;
+    if (cachedAudio && cachedAudio.audioUrl !== audioUrlRef.current) {
+      URL.revokeObjectURL(cachedAudio.audioUrl);
+    }
+    cachedAudioRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -113,17 +205,95 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     return () => {
       window.removeEventListener("stepwise:clear-voice-data", handleClearVoiceData);
       recognitionRef.current?.abort();
+      audioElementRef.current?.pause();
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+      clearCachedAudio();
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current as ReturnType<typeof setTimeout>);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current as ReturnType<typeof setTimeout>);
+      if (speechStartTimerRef.current) clearTimeout(speechStartTimerRef.current);
       if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
     };
-  }, [clearSilenceTimer]);
+  }, [clearCachedAudio, clearSilenceTimer]);
+
+  const fetchSpeechAudio = useCallback(async (spokenText: string): Promise<SpeechAudio> => {
+    const response = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: spokenText }),
+    });
+
+    if (!response.ok) {
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(data?.error ?? `TTS request failed: ${response.status}`);
+    }
+
+    const data = (await response.json()) as {
+      audioData?: string;
+      mimeType?: string;
+      model?: string;
+    };
+
+    if (!data.audioData) {
+      throw new Error("TTS route returned no audio data.");
+    }
+
+    const mimeType = data.mimeType ?? "audio/wav";
+    return {
+      audioUrl: base64ToBlobUrl(data.audioData, mimeType),
+      mimeType,
+      model: data.model,
+      text: spokenText,
+    };
+  }, []);
+
+  const preloadSpeech = useCallback(
+    async (text: string) => {
+      const spokenText = normalizeSpeechText(text);
+      if (!spokenText) return;
+      if (cachedAudioRef.current?.text === spokenText) return;
+      if (preloadRequestRef.current === spokenText) return;
+
+      preloadRequestRef.current = spokenText;
+      setState((prev) => ({
+        ...prev,
+        ttsStatus: "Preparing Gemini speech audio...",
+      }));
+
+      try {
+        const speechAudio = await fetchSpeechAudio(spokenText);
+        if (preloadRequestRef.current !== spokenText) {
+          URL.revokeObjectURL(speechAudio.audioUrl);
+          return;
+        }
+
+        clearCachedAudio();
+        cachedAudioRef.current = speechAudio;
+        setState((prev) => ({
+          ...prev,
+          ttsStatus: `Gemini speech audio ready${speechAudio.model ? ` (${speechAudio.model})` : ""}.`,
+        }));
+      } catch (err) {
+        setState((prev) => ({
+          ...prev,
+          ttsStatus:
+            err instanceof Error
+              ? `Gemini TTS preload failed: ${err.message}`
+              : "Gemini TTS preload failed.",
+        }));
+      } finally {
+        if (preloadRequestRef.current === spokenText) {
+          preloadRequestRef.current = null;
+        }
+      }
+    },
+    [clearCachedAudio, fetchSpeechAudio]
+  );
 
   const finalizeTurn = useCallback(() => {
     const transcript = finalTranscriptRef.current.trim();
     if (!transcript) {
       clearSilenceTimer();
-      setState((prev) => ({ ...prev, mode: "idle", captions: prev.captions || "Listening…" }));
+      setState((prev) => ({ ...prev, mode: "idle" }));
       return;
     }
 
@@ -136,7 +306,6 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       ...prev,
       mode: "idle",
       transcript,
-      captions: transcript,
       transcriptHistory: [...prev.transcriptHistory, entry],
     }));
 
@@ -163,7 +332,6 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       setState((prev) => ({
         ...prev,
         mode: "error",
-        captions: "Voice input unavailable",
         error: "Speech recognition is not supported in this browser.",
       }));
       return;
@@ -193,9 +361,8 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
           ...prev,
           mode: "listening",
           transcript: "",
-          captions: "Listening…",
           error: null,
-          supported: true,
+          sttSupported: true,
         }));
       };
 
@@ -225,7 +392,6 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
             ...prev,
             mode: "listening",
             transcript: liveTranscript,
-            captions: liveTranscript || "Listening…",
           }));
 
           clearSilenceTimer();
@@ -264,7 +430,6 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
           ...prev,
           mode: "idle",
           transcript: finalTranscriptRef.current.trim() || prev.transcript,
-          captions: finalTranscriptRef.current.trim() || prev.captions || "Listening…",
         }));
         recognitionRef.current = null;
       };
@@ -275,7 +440,6 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       setState((prev) => ({
         ...prev,
         mode: "error",
-        captions: "Voice input unavailable",
         error:
           err instanceof Error
             ? err.message
@@ -291,18 +455,14 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     }
   }, [clearSilenceTimer]);
 
-  const speak = useCallback((text: string) => {
+  const speak = useCallback(async (text: string) => {
     if (!isSpeechSynthesisSupported()) {
       setState((prev) => ({
         ...prev,
         mode: "error",
         error: "Speech synthesis is not supported in this browser.",
+        ttsStatus: "Browser TTS is not supported here.",
       }));
-      return;
-    }
-
-    const settings = loadSettings();
-    if (!settings.ttsEnabled) {
       return;
     }
 
@@ -312,51 +472,267 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       recognitionRef.current = null;
     }
     clearSilenceTimer();
-    window.speechSynthesis.cancel();
+    if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+      window.speechSynthesis.cancel();
+    }
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "en-US";
-    utterance.rate = Math.max(0.5, Math.min(2.0, settings.talkingSpeed ?? 1));
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
+    const spokenText = normalizeSpeechText(text);
+    if (!spokenText) {
+      setState((prev) => ({
+        ...prev,
+        ttsStatus: "Read request received, but there was no readable text.",
+      }));
+      return;
+    }
 
-    const entry = createTranscriptEntry("assistant", text);
+    try {
+      if (audioElementRef.current) {
+        audioElementRef.current.pause();
+        audioElementRef.current = null;
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
+
+      const entry = createTranscriptEntry("assistant", spokenText);
+      const cachedAudio =
+        cachedAudioRef.current?.text === spokenText ? cachedAudioRef.current : null;
+      if (cachedAudio) {
+        cachedAudioRef.current = null;
+      }
+
+      setState((prev) => ({
+        ...prev,
+        mode: "speaking",
+        error: null,
+        soundEnabled: true,
+        ttsStatus: cachedAudio
+          ? "Starting prepared Gemini speech audio..."
+          : "Generating Gemini speech audio...",
+        transcriptHistory: [...prev.transcriptHistory, entry],
+      }));
+
+      const speechAudio = cachedAudio ?? (await fetchSpeechAudio(spokenText));
+      const audioUrl = speechAudio.audioUrl;
+      const audio = new Audio(audioUrl);
+      audioElementRef.current = audio;
+      audioUrlRef.current = audioUrl;
+      audio.playbackRate = Math.max(0.5, Math.min(2.0, loadSettings().talkingSpeed ?? 1));
+      audio.onplaying = () => {
+        setState((prev) => ({
+          ...prev,
+          mode: "speaking",
+          error: null,
+          ttsStatus: `Playing Gemini speech audio${speechAudio.model ? ` (${speechAudio.model})` : ""}.`,
+        }));
+      };
+      audio.onended = () => {
+        if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+        audioElementRef.current = null;
+        setState((prev) => ({
+          ...prev,
+          mode: "idle",
+          ttsStatus: "Finished Gemini speech audio.",
+        }));
+      };
+      audio.onerror = () => {
+        if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+        audioElementRef.current = null;
+        setState((prev) => ({
+          ...prev,
+          mode: "error",
+          error: "Generated speech audio could not be played.",
+          ttsStatus: "Generated speech audio could not be played.",
+        }));
+      };
+
+      await audio.play();
+      return;
+    } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        mode: "speaking",
+        ttsStatus: `${
+          err instanceof Error ? err.message : "Gemini TTS failed"
+        }; falling back to browser TTS.`,
+      }));
+    }
+
+    const chunks = splitSpeechIntoChunks(spokenText);
+    if (chunks.length === 0) {
+      setState((prev) => ({
+        ...prev,
+        ttsStatus: "Read request received, but no speech chunks were created.",
+      }));
+      return;
+    }
+
+    const settings = loadSettings();
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice =
+      voices.find((voice) => voice.lang.toLowerCase().startsWith("en")) ?? null;
+
+    const createUtterance = (chunk: string) => {
+      const utterance = new SpeechSynthesisUtterance(chunk);
+      utterance.lang = preferredVoice?.lang ?? "en-US";
+      utterance.voice = preferredVoice;
+      utterance.rate = Math.max(0.5, Math.min(2.0, settings.talkingSpeed ?? 1));
+      utterance.pitch = 1.0;
+      utterance.volume = 1.0;
+      return utterance;
+    };
+
+    const speakQueuedChunk = () => {
+      const utterance = utteranceQueueRef.current.shift();
+      if (!utterance) {
+        utteranceRef.current = null;
+        if (speechStartTimerRef.current) {
+          clearTimeout(speechStartTimerRef.current);
+          speechStartTimerRef.current = null;
+        }
+        setState((prev) => ({
+          ...prev,
+          mode: "idle",
+          ttsStatus: "Finished reading aloud.",
+        }));
+        return;
+      }
+
+      utteranceRef.current = utterance;
+      window.speechSynthesis.speak(utterance);
+      window.speechSynthesis.resume();
+    };
+
+    const utterances = chunks.map((chunk) => {
+      const utterance = createUtterance(chunk);
+      utterance.onstart = () => {
+        if (speechStartTimerRef.current) {
+          clearTimeout(speechStartTimerRef.current);
+          speechStartTimerRef.current = null;
+        }
+        setState((prev) => ({
+          ...prev,
+          mode: "speaking",
+          error: null,
+          ttsStatus: `Speech started with ${utterance.voice?.name ?? "default voice"}.`,
+        }));
+      };
+
+      utterance.onend = () => {
+        speakQueuedChunk();
+      };
+
+      utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
+        if (speechStartTimerRef.current) {
+          clearTimeout(speechStartTimerRef.current);
+          speechStartTimerRef.current = null;
+        }
+
+        if (event.error === "interrupted" || event.error === "canceled") {
+          utteranceQueueRef.current = [];
+          utteranceRef.current = null;
+          setState((prev) => ({
+            ...prev,
+            mode: "idle",
+            ttsStatus: `Speech ${event.error}.`,
+          }));
+          return;
+        }
+
+        utteranceQueueRef.current = [];
+        utteranceRef.current = null;
+        setState((prev) => ({
+          ...prev,
+          mode: "error",
+          error: `Speech synthesis error: ${event.error}`,
+          ttsStatus: `Speech synthesis error: ${event.error}`,
+        }));
+      };
+
+      return utterance;
+    });
+
+    if (utterances.length === 0) return;
+
+    utteranceQueueRef.current = utterances;
+
+    const retryFirstChunk = () => {
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+        return;
+      }
+
+      setState((prev) => ({
+        ...prev,
+        ttsStatus: "Speech did not start; retrying browser TTS once.",
+      }));
+
+      utteranceQueueRef.current = chunks.map((chunk) => {
+        const utterance = createUtterance(chunk);
+        utterance.onstart = utterances[0].onstart;
+        utterance.onend = () => speakQueuedChunk();
+        utterance.onerror = utterances[0].onerror;
+        return utterance;
+      });
+
+      speakQueuedChunk();
+    };
+
+    const entry = createTranscriptEntry("assistant", spokenText);
+    soundEnabledRef.current = true;
     setState((prev) => ({
       ...prev,
       mode: "speaking",
-      captions: text,
       error: null,
+      soundEnabled: true,
+      ttsStatus: `Read request queued: ${chunks.length} chunk${chunks.length === 1 ? "" : "s"}, ${voices.length} voice${voices.length === 1 ? "" : "s"} available.`,
       transcriptHistory: [...prev.transcriptHistory, entry],
     }));
 
-    utterance.onstart = () => {
-      setState((prev) => ({ ...prev, mode: "speaking", error: null }));
-    };
-
-    utterance.onend = () => {
-      setState((prev) => ({ ...prev, mode: "idle", captions: prev.captions || "Listening…" }));
-    };
-
-    utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
-      if (event.error === "interrupted" || event.error === "canceled") {
-        setState((prev) => ({ ...prev, mode: "idle", captions: prev.captions || "Listening…" }));
-        return;
-      }
-      setState((prev) => ({
-        ...prev,
-        mode: "error",
-        error: `Speech synthesis error: ${event.error}`,
-      }));
-    };
-
-    utteranceRef.current = utterance;
-    window.speechSynthesis.speak(utterance);
-  }, [clearSilenceTimer]);
+    speakQueuedChunk();
+    speechStartTimerRef.current = window.setTimeout(retryFirstChunk, 600);
+  }, [clearSilenceTimer, fetchSpeechAudio]);
 
   const cancelSpeech = useCallback(() => {
+    audioElementRef.current?.pause();
+    audioElementRef.current = null;
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
     if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
+    utteranceQueueRef.current = [];
+    if (speechStartTimerRef.current) {
+      clearTimeout(speechStartTimerRef.current);
+      speechStartTimerRef.current = null;
+    }
     utteranceRef.current = null;
-    setState((prev) => ({ ...prev, mode: "idle", captions: prev.captions || "Listening…" }));
+    setState((prev) => ({ ...prev, mode: "idle" }));
+  }, []);
+
+  const toggleSound = useCallback(() => {
+    setState((prev) => {
+      const nextSoundEnabled = !prev.soundEnabled;
+      soundEnabledRef.current = nextSoundEnabled;
+      saveSettings({ ttsEnabled: nextSoundEnabled });
+
+      if (!nextSoundEnabled && isSpeechSynthesisSupported()) {
+        window.speechSynthesis.cancel();
+        if (speechStartTimerRef.current) {
+          clearTimeout(speechStartTimerRef.current);
+          speechStartTimerRef.current = null;
+        }
+        utteranceRef.current = null;
+      }
+
+      return {
+        ...prev,
+        soundEnabled: nextSoundEnabled,
+        mode: nextSoundEnabled ? prev.mode : "idle",
+      };
+    });
   }, []);
 
   const toggleNativeVoiceMode = useCallback(() => {
@@ -366,6 +742,9 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
   const setVoiceSpeed = useCallback((speed: number) => {
     const nextSpeed = Math.max(0.5, Math.min(2.0, speed));
     saveSettings({ talkingSpeed: nextSpeed });
+    if (audioElementRef.current) {
+      audioElementRef.current.playbackRate = nextSpeed;
+    }
     setState((prev) => ({ ...prev, voiceSpeed: nextSpeed }));
   }, []);
 
@@ -374,7 +753,6 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     setState((prev) => ({
       ...prev,
       transcript: "",
-      captions: "",
       transcriptHistory: [],
     }));
   }, []);
@@ -384,7 +762,9 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     startListening,
     stopListening,
     speak,
+    preloadSpeech,
     cancelSpeech,
+    toggleSound,
     toggleNativeVoiceMode,
     setVoiceSpeed,
     clearTranscriptHistory,
