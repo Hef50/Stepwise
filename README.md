@@ -38,7 +38,7 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
-## Environment Variables
+## Environment Variables 
 
 | Variable | Required for | Description | Where to get |
 |---|---|---|---|
