@@ -51,7 +51,7 @@ const MODE_STORAGE_KEY = "stepwise_mode";
 
 export function AppShell() {
   const { editorRef, capture } = useWhiteboardCapture();
-  const { renderLatex } = useWhiteboardMath(editorRef);
+  const { renderLatex, focusLatexShape } = useWhiteboardMath(editorRef);
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH);
   const [mode, setMode] = useState<AppMode>("text");
   const [activeModel, setActiveModel] = useState<ActiveModel>("llm7");
@@ -142,6 +142,7 @@ export function AppShell() {
       <ChatPanel
         captureWhiteboard={capture}
         renderLatexOnCanvas={renderLatex}
+        focusLatexShape={focusLatexShape}
         onActiveModelChange={setActiveModel}
       />
     );

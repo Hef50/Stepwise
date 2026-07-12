@@ -13,9 +13,11 @@ interface MessageBubbleProps {
   onDelete: (id: string) => void;
   /** When set, overrides the message text (e.g. throttled stream reveal). */
   textOverride?: string;
+  /** Called when the user clicks "Go to equation" for a given latex string. */
+  focusEquation?: (latex: string) => void;
 }
 
-export function MessageBubble({ message, onDelete, textOverride }: MessageBubbleProps) {
+export function MessageBubble({ message, onDelete, textOverride, focusEquation }: MessageBubbleProps) {
   const isUser = message.role === "user";
 
   // Exclude tool invocations that are silently routed to the canvas —
@@ -40,7 +42,7 @@ export function MessageBubble({ message, onDelete, textOverride }: MessageBubble
   return (
     <div
       className={cn(
-        "group relative flex gap-3 px-1",
+        "group relative flex w-full min-w-0 gap-3 px-1",
         isUser ? "flex-row-reverse" : "flex-row"
       )}
     >
@@ -61,10 +63,10 @@ export function MessageBubble({ message, onDelete, textOverride }: MessageBubble
       </div>
 
       {/* Bubble + delete button */}
-      <div className={cn("flex items-start gap-1", isUser ? "flex-row-reverse" : "flex-row")}>
+      <div className={cn("flex min-w-0 flex-1 items-start gap-1", isUser ? "flex-row-reverse" : "flex-row")}>
         <div
           className={cn(
-            "max-w-[80%] rounded-2xl px-4 py-3 text-sm shadow-sm",
+            "min-w-0 max-w-[85%] overflow-hidden rounded-2xl px-4 py-3 text-sm shadow-sm",
             isUser
               ? "rounded-tr-sm bg-primary text-primary-foreground"
               : "rounded-tl-sm bg-secondary text-secondary-foreground"
@@ -95,10 +97,10 @@ export function MessageBubble({ message, onDelete, textOverride }: MessageBubble
 
           {isUser ? (
             textContent ? (
-              <p className="whitespace-pre-wrap leading-relaxed">{textContent}</p>
+              <p className="whitespace-pre-wrap break-words leading-relaxed">{textContent}</p>
             ) : null
           ) : (
-            <MessageRenderer content={textContent} />
+            <MessageRenderer content={textContent} focusEquation={focusEquation} />
           )}
         </div>
 

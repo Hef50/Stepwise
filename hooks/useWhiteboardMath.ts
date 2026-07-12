@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback } from "react";
-import type { Editor } from "@tldraw/tldraw";
+import { createShapeId, type Editor, type TLShapeId } from "@tldraw/tldraw";
 import { AI_LATEX_ANIMATED_TYPE } from "@/components/whiteboard/shapes/LatexAnimatedShapeUtil";
 import {
   parseSvgPaths,
@@ -13,20 +13,22 @@ export interface UseWhiteboardMathReturn {
   /**
    * Convert a LaTeX string to SVG paths via the server API, then place a
    * LatexAnimatedShape on the tldraw canvas below any existing content.
-   * Fire-and-forget: rejections are caught and logged.
+   * Returns the created shape's id, or null on failure.
    */
-  renderLatex: (latex: string, displayMode?: boolean) => Promise<void>;
+  renderLatex: (latex: string, displayMode?: boolean) => Promise<string | null>;
+  /** Pan + zoom the tldraw camera to focus on the shape with the given id. */
+  focusLatexShape: (shapeId: string) => void;
 }
 
 export function useWhiteboardMath(
   editorRef: React.RefObject<Editor | null>
 ): UseWhiteboardMathReturn {
   const renderLatex = useCallback(
-    async (latex: string, displayMode = true): Promise<void> => {
+    async (latex: string, displayMode = true): Promise<string | null> => {
       const editor = editorRef.current;
       if (!editor) {
         console.warn("[useWhiteboardMath] editor not ready, skipping render");
-        return;
+        return null;
       }
 
       let svgString: string;
@@ -51,7 +53,7 @@ export function useWhiteboardMath(
         svgString = json.svg;
       } catch (err) {
         console.error("[useWhiteboardMath] SVG fetch failed:", err);
-        return;
+        return null;
       }
 
       let paths: ReturnType<typeof parseSvgPaths>["paths"];
@@ -62,21 +64,20 @@ export function useWhiteboardMath(
         viewBox = parsed.viewBox;
       } catch (err) {
         console.error("[useWhiteboardMath] SVG parse failed:", err);
-        return;
+        return null;
       }
 
-      // Cap paths to prevent degenerate animations
       const cappedPaths = paths.slice(0, MAX_ANIMATED_PATHS);
-
       const { w, h } = estimateShapeDimensions(viewBox);
 
-      // Place the shape below all existing content on the page
       const existingBounds = editor.getCurrentPageBounds();
       const x = 60;
       const y = existingBounds ? existingBounds.maxY + 40 : 100;
 
+      const id = createShapeId();
       try {
         editor.createShape({
+          id,
           type: AI_LATEX_ANIMATED_TYPE,
           x,
           y,
@@ -88,12 +89,30 @@ export function useWhiteboardMath(
             h,
           },
         });
+        return id;
       } catch (err) {
         console.error("[useWhiteboardMath] createShape failed:", err);
+        return null;
       }
     },
     [editorRef]
   );
 
-  return { renderLatex };
+  const focusLatexShape = useCallback(
+    (shapeId: string) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      try {
+        const shape = editor.getShape(shapeId as TLShapeId);
+        if (!shape) return;
+        editor.select(shapeId as TLShapeId);
+        editor.zoomToSelection({ animation: { duration: 400 } });
+      } catch (err) {
+        console.warn("[useWhiteboardMath] focusLatexShape failed:", err);
+      }
+    },
+    [editorRef]
+  );
+
+  return { renderLatex, focusLatexShape };
 }

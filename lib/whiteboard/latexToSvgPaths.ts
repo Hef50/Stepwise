@@ -20,6 +20,26 @@ export interface ParsedSvgPaths {
  *
  * Must be called in a browser context (uses DOMParser).
  */
+/**
+ * Walks from `el` up to (but excluding) `root`, concatenating every ancestor's
+ * `transform` attribute in root-first order. This reproduces the effective
+ * transform each SVG element inherits from its nesting, so a flattened <path>
+ * can be positioned identically to its original place in the tree.
+ */
+function getAccumulatedTransform(
+  el: Element,
+  root: Element
+): string | undefined {
+  const transforms: string[] = [];
+  let cur: Element | null = el;
+  while (cur && cur !== root) {
+    const t = cur.getAttribute("transform");
+    if (t) transforms.unshift(t);
+    cur = cur.parentElement;
+  }
+  return transforms.length > 0 ? transforms.join(" ") : undefined;
+}
+
 export function parseSvgPaths(svgString: string): ParsedSvgPaths {
   if (typeof window === "undefined") {
     throw new Error("parseSvgPaths must be called in a browser context");
@@ -41,12 +61,32 @@ export function parseSvgPaths(svgString: string): ParsedSvgPaths {
 
   const viewBox = svgEl.getAttribute("viewBox") ?? "0 0 100 40";
 
-  const pathEls = Array.from(svgEl.querySelectorAll("path"));
+  // Query <path> AND <rect> in document order. MathJax draws glyph outlines as
+  // <path>, but renders fraction bars, \sqrt vincula and \overline rules as
+  // <rect> elements — those were previously dropped, so fractions rendered with
+  // no dividing line. Convert each rect into an equivalent closed path.
+  const drawableEls = Array.from(svgEl.querySelectorAll("path, rect"));
 
-  const paths: SvgPathData[] = pathEls.reduce<SvgPathData[]>((acc, el) => {
+  const paths: SvgPathData[] = drawableEls.reduce<SvgPathData[]>((acc, el) => {
+    // MathJax stores all positioning (the scale(1,-1) Y-flip and per-glyph
+    // translate groups) on ancestor <g> elements, not on the element itself.
+    // Accumulate every ancestor transform (root-first) so the glyph renders
+    // in the correct position and orientation.
+    const transform = getAccumulatedTransform(el, svgEl);
+
+    if (el.tagName.toLowerCase() === "rect") {
+      const x = Number(el.getAttribute("x") ?? "0") || 0;
+      const y = Number(el.getAttribute("y") ?? "0") || 0;
+      const rw = Number(el.getAttribute("width") ?? "0") || 0;
+      const rh = Number(el.getAttribute("height") ?? "0") || 0;
+      if (rw <= 0 || rh <= 0) return acc;
+      const d = `M${x} ${y}h${rw}v${rh}h${-rw}Z`;
+      acc.push({ d, transform });
+      return acc;
+    }
+
     const d = el.getAttribute("d");
     if (!d) return acc;
-    const transform = el.getAttribute("transform") ?? undefined;
     acc.push({ d, transform });
     return acc;
   }, []);

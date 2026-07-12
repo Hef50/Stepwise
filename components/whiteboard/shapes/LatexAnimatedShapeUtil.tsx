@@ -8,6 +8,54 @@ import {
 } from "@tldraw/tldraw";
 import type { SvgPathData } from "@/lib/types";
 
+// ─── Inline prop validators ────────────────────────────────────────────────────
+// Satisfy tldraw's Validatable<T> interface without importing @tldraw/validate
+// directly, which would cause a duplicate-module instance warning in Turbopack.
+
+type Validatable<T> = { validate(value: unknown): T };
+
+function mkString(): Validatable<string> {
+  return {
+    validate(v) {
+      if (typeof v !== "string")
+        throw new TypeError(`Expected string, got ${typeof v}`);
+      return v;
+    },
+  };
+}
+
+function mkNumber(): Validatable<number> {
+  return {
+    validate(v) {
+      if (typeof v !== "number")
+        throw new TypeError(`Expected number, got ${typeof v}`);
+      return v;
+    },
+  };
+}
+
+function mkArrayOfSvgPath(): Validatable<SvgPathData[]> {
+  return {
+    validate(v) {
+      if (!Array.isArray(v)) throw new TypeError("Expected array for svgPaths");
+      return v.map((item: unknown, i: number) => {
+        if (typeof item !== "object" || item === null)
+          throw new TypeError(`svgPaths[${i}] must be an object`);
+        const obj = item as Record<string, unknown>;
+        if (typeof obj.d !== "string")
+          throw new TypeError(`svgPaths[${i}].d must be a string`);
+        const t = obj.transform;
+        if (t !== undefined && t !== null && typeof t !== "string")
+          throw new TypeError(`svgPaths[${i}].transform must be a string or undefined`);
+        return {
+          d: obj.d,
+          transform: typeof t === "string" ? t : undefined,
+        } satisfies SvgPathData;
+      });
+    },
+  };
+}
+
 // ─── Type Augmentation ────────────────────────────────────────────────────────
 
 declare module "@tldraw/tlschema" {
@@ -53,6 +101,14 @@ interface RendererProps {
 
 function LatexAnimatedRenderer({ shape }: RendererProps) {
   const { svgPaths, viewBox, w, h } = shape.props;
+
+  // MathJax glyph paths live in a large coordinate space (viewBox width can be
+  // thousands of units) that the SVG scales down to `w`. A fixed strokeWidth in
+  // those units renders as a fraction of a pixel. Derive the stroke from the
+  // viewBox so the on-screen pen width stays visible and consistent (~2px):
+  //   onScreenPx = strokeWidth * (w / viewBoxWidth)  ⇒  strokeWidth = viewBoxWidth / (w / 2)
+  const viewBoxWidth = Number(viewBox.split(/\s+/)[2] ?? "0") || w;
+  const strokeWidth = viewBoxWidth / (w / 2);
 
   const shouldAnimate = svgPaths.length > 0 && svgPaths.length <= MAX_ANIMATED;
   const totalMs = shouldAnimate ? svgPaths.length * STEP_MS : 0;
@@ -117,7 +173,9 @@ function LatexAnimatedRenderer({ shape }: RendererProps) {
               transform={p.transform}
               fill="none"
               stroke="currentColor"
-              strokeWidth={0.08}
+              strokeWidth={strokeWidth}
+              strokeLinecap="round"
+              strokeLinejoin="round"
               pathLength={1}
               strokeDasharray={1}
               style={{
@@ -137,6 +195,14 @@ function LatexAnimatedRenderer({ shape }: RendererProps) {
 
 export class LatexAnimatedShapeUtil extends BaseBoxShapeUtil<LatexAnimatedShape> {
   static override type = AI_LATEX_ANIMATED_TYPE;
+
+  static override props = {
+    latex: mkString(),
+    viewBox: mkString(),
+    w: mkNumber(),
+    h: mkNumber(),
+    svgPaths: mkArrayOfSvgPath(),
+  };
 
   override getDefaultProps(): LatexAnimatedProps {
     return {

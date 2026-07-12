@@ -52,8 +52,8 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
   }, [code, containerId]);
 
   return (
-    <Card className="my-2 overflow-hidden">
-      <CardContent className="p-4">
+    <Card className="my-2 overflow-hidden max-w-full">
+      <CardContent className="p-4 max-w-full overflow-hidden">
         {status === "loading" && (
           <div className="space-y-2">
             <Skeleton className="h-4 w-3/4" />
@@ -63,12 +63,12 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
         )}
 
         {status === "error" && (
-          <div className="flex items-start gap-2 text-sm text-destructive">
+          <div className="flex items-start gap-2 text-sm text-destructive max-w-full">
             <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
-            <div>
+            <div className="min-w-0 flex-1">
               <p className="font-medium">Diagram rendering failed</p>
-              <p className="text-xs text-muted-foreground">{errorMessage}</p>
-              <pre className="mt-2 rounded bg-muted p-2 text-xs text-foreground overflow-auto max-h-32">
+              <p className="text-xs text-muted-foreground truncate">{errorMessage}</p>
+              <pre className="mt-2 rounded bg-muted p-2 text-xs text-foreground overflow-auto max-h-24 max-w-full whitespace-pre-wrap break-all">
                 {code}
               </pre>
             </div>

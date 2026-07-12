@@ -14,6 +14,13 @@ interface ChatMessagesProps {
   isLoading: boolean;
   onDeleteMessage: (id: string) => void;
   textSpeed: number;
+  /** Called when the user clicks "Go to equation" for a given latex string. */
+  focusEquation?: (latex: string) => void;
+  /**
+   * Reports the currently *revealed* (throttled) assistant text so equation
+   * extraction stays in sync with the chat reveal instead of the raw stream.
+   */
+  onRevealedText?: (text: string) => void;
 }
 
 function getAssistantText(message: UIMessage): string {
@@ -28,6 +35,8 @@ export function ChatMessages({
   isLoading,
   onDeleteMessage,
   textSpeed,
+  focusEquation,
+  onRevealedText,
 }: ChatMessagesProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(
@@ -70,6 +79,15 @@ export function ChatMessages({
     lastMsg?.role === "assistant" &&
     charsPerSecond !== null &&
     lastDisplayedLen < lastAssistantTextLen;
+
+  // Report the throttled reveal text upward so canvas equation extraction only
+  // fires once the chat has visibly "typed" that far — keeping the whiteboard
+  // animation in step with the chat rather than jumping ahead of the stream.
+  useEffect(() => {
+    if (onRevealedText && lastMsg?.role === "assistant") {
+      onRevealedText(lastDisplayedText);
+    }
+  }, [onRevealedText, lastDisplayedText, lastMsg?.role]);
 
   useEffect(() => {
     const viewport = bottomRef.current?.closest(
@@ -115,6 +133,7 @@ export function ChatMessages({
                 ? lastDisplayedText
                 : undefined
             }
+            focusEquation={focusEquation}
           />
         ))}
 

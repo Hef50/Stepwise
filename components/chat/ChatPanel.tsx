@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, type FormEvent } from "react";
+import { useState, useCallback, useEffect, useRef, type FormEvent } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { AlertTriangle, Trash2, Zap } from "lucide-react";
@@ -20,6 +20,8 @@ import { loadTextSpeed, saveTextSpeed } from "@/lib/chat/textReveal";
 import { useVoiceTA } from "@/hooks/useVoiceTA";
 import { useChatPersistence } from "@/hooks/useChatPersistence";
 import { useCourseMaterials, toMessageAttachment } from "@/hooks/useCourseMaterials";
+import { detectWhiteboardIntent } from "@/lib/chat/whiteboardIntent";
+import { extractNewEquations } from "@/lib/chat/extractEquations";
 import type {
   UploadedFile,
   CanvasPayload,
@@ -33,8 +35,10 @@ type StepwiseUIMessage = UIMessage<StepwiseMessageMetadata>;
 
 interface ChatPanelProps {
   captureWhiteboard: () => Promise<CanvasPayload | null>;
-  /** Routes a LaTeX string to the tldraw canvas as an animated shape */
-  renderLatexOnCanvas?: (latex: string, displayMode?: boolean) => Promise<void>;
+  /** Routes a LaTeX string to the tldraw canvas as an animated shape. Returns the created shape id or null. */
+  renderLatexOnCanvas?: (latex: string, displayMode?: boolean) => Promise<string | null>;
+  /** Pan + zoom the canvas to focus on the given tldraw shape id. */
+  focusLatexShape?: (shapeId: string) => void;
   onActiveModelChange?: (model: ActiveModel) => void;
 }
 
@@ -51,6 +55,7 @@ function isRateLimitError(error: Error | null | undefined): boolean {
 export function ChatPanel({
   captureWhiteboard,
   renderLatexOnCanvas,
+  focusLatexShape,
   onActiveModelChange,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
@@ -63,6 +68,14 @@ export function ChatPanel({
   const voice = useVoiceTA();
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
   const courseMaterials = useCourseMaterials();
+
+  // ── Equation canvas sync ─────────────────────────────────────────────────
+  /** Equations already rendered on the whiteboard (normalized latex → shapeId) */
+  const equationShapeMapRef = useRef<Map<string, string>>(new Map());
+  /** Set of normalized latex strings sent to the whiteboard (prevents re-sending) */
+  const renderedEquationsRef = useRef<Set<string>>(new Set());
+  /** Throttled reveal text from ChatMessages — extraction keys off this, not the raw stream. */
+  const [revealedText, setRevealedText] = useState("");
 
   const provider: ChatProvider = escalated ? "gemma" : "llm7";
 
@@ -86,13 +99,18 @@ export function ChatPanel({
         if (toolCall.dynamic) return;
 
         if (toolCall.toolName === "render_math_whiteboard") {
-          // Route the LaTeX to the canvas — fire and forget
+          const { latex, displayMode } = toolCall.input as {
+            latex: string;
+            displayMode?: boolean;
+          };
+
+          // Route the LaTeX to the canvas and store the resulting shape id
           if (renderLatexOnCanvas) {
-            const { latex, displayMode } = toolCall.input as {
-              latex: string;
-              displayMode?: boolean;
-            };
-            void renderLatexOnCanvas(latex, displayMode);
+            void renderLatexOnCanvas(latex, displayMode).then((shapeId) => {
+              if (shapeId) {
+                equationShapeMapRef.current.set(latex.trim(), shapeId);
+              }
+            });
           }
 
           // Acknowledge the tool call immediately so the AI stream can continue
@@ -135,6 +153,35 @@ export function ChatPanel({
     }
   }, [messages, saveMessages]);
 
+  // ── Reveal-synced equation extraction → whiteboard ───────────────────────
+  // Keyed off the throttled `revealedText` (not the raw stream) so equations are
+  // placed on the canvas only once the chat has visibly typed that far.
+  // extractNewEquations only returns equations not yet in renderedEquationsRef,
+  // so each unique equation is placed on the canvas exactly once.
+  useEffect(() => {
+    if (!renderLatexOnCanvas || !revealedText) return;
+
+    const newEqs = extractNewEquations(revealedText, renderedEquationsRef.current);
+    for (const eq of newEqs) {
+      void renderLatexOnCanvas(eq, true).then((shapeId) => {
+        if (shapeId) {
+          equationShapeMapRef.current.set(eq.trim(), shapeId);
+        }
+      });
+    }
+  }, [revealedText, renderLatexOnCanvas]);
+
+  /** Pan + zoom the tldraw canvas to the shape linked to `latex`. */
+  const focusEquation = useCallback(
+    (latex: string) => {
+      const shapeId = equationShapeMapRef.current.get(latex.trim());
+      if (shapeId && focusLatexShape) {
+        focusLatexShape(shapeId);
+      }
+    },
+    [focusLatexShape]
+  );
+
   const handleSubmit = useCallback(
     async (e: FormEvent<HTMLFormElement>) => {
       e.preventDefault();
@@ -173,9 +220,11 @@ export function ChatPanel({
       const metadata: StepwiseMessageMetadata | undefined =
         pdfAttachments.length > 0 ? { attachments: pdfAttachments } : undefined;
 
+      const forceWhiteboard = detectWhiteboardIntent(trimmed);
+
       sendMessage(
         { parts, metadata },
-        { body: { provider: effectiveProvider } }
+        { body: { provider: effectiveProvider, forceWhiteboard } }
       );
       setInput("");
       setFiles([]);
@@ -270,6 +319,8 @@ export function ChatPanel({
           isLoading={isLoading}
           onDeleteMessage={handleDeleteMessage}
           textSpeed={textSpeed}
+          focusEquation={focusEquation}
+          onRevealedText={setRevealedText}
         />
 
         {/* Rate limit error banner */}
