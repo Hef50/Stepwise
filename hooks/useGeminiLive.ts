@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ActivityHandling,
   GoogleGenAI,
   Modality,
+  TurnCoverage,
   type LiveServerMessage,
   type Session,
 } from "@google/genai";
@@ -119,7 +121,9 @@ export function useGeminiLive(): GeminiLiveControls {
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const silentGainRef = useRef<GainNode | null>(null);
+  const playbackSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const playbackTimeRef = useRef(0);
+  const lastLocalBargeInRef = useRef(0);
   const inputFinalRef = useRef("");
   const outputFinalRef = useRef("");
   const manualDisconnectRef = useRef(false);
@@ -154,6 +158,19 @@ export function useGeminiLive(): GeminiLiveControls {
     }
   }, []);
 
+  const stopPlayback = useCallback(() => {
+    playbackSourcesRef.current.forEach((source) => {
+      try {
+        source.stop();
+      } catch {
+        // Source may already have ended.
+      }
+      source.disconnect();
+    });
+    playbackSourcesRef.current.clear();
+    playbackTimeRef.current = audioContextRef.current?.currentTime ?? 0;
+  }, []);
+
   const playPcmAudio = useCallback((base64: string) => {
     const audioContext = audioContextRef.current;
     if (!audioContext) return;
@@ -169,6 +186,11 @@ export function useGeminiLive(): GeminiLiveControls {
     const source = audioContext.createBufferSource();
     source.buffer = buffer;
     source.connect(audioContext.destination);
+    playbackSourcesRef.current.add(source);
+    source.onended = () => {
+      playbackSourcesRef.current.delete(source);
+      source.disconnect();
+    };
 
     const startAt = Math.max(audioContext.currentTime, playbackTimeRef.current);
     source.start(startAt);
@@ -181,12 +203,13 @@ export function useGeminiLive(): GeminiLiveControls {
       if (!content) return;
 
       if (content.interrupted) {
-        playbackTimeRef.current = audioContextRef.current?.currentTime ?? 0;
+        stopPlayback();
       }
 
       const inputText =
         content.inputTranscription?.text ?? content.interimInputTranscription?.text ?? "";
       if (inputText) {
+        stopPlayback();
         setState((prev) => ({ ...prev, inputCaption: inputText }));
         if (content.inputTranscription?.text) {
           inputFinalRef.current += `${inputText} `;
@@ -217,7 +240,7 @@ export function useGeminiLive(): GeminiLiveControls {
         }));
       }
     },
-    [appendTranscript, playPcmAudio]
+    [appendTranscript, playPcmAudio, stopPlayback]
   );
 
   const connect = useCallback(async () => {
@@ -249,6 +272,11 @@ export function useGeminiLive(): GeminiLiveControls {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
+          realtimeInputConfig: {
+            automaticActivityDetection: { disabled: false },
+            activityHandling: ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+            turnCoverage: TurnCoverage.TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO,
+          },
           systemInstruction:
             "You are Stepwise, a warm expert AI teaching assistant in a live office-hours call. The student may share their whiteboard as video frames — carefully read every equation, variable, diagram, and written work shown there and use it as the primary source of truth for the problem they are working on. Keep answers concise, conversational, and educational. Ask a short follow-up question when it helps the student keep moving.",
         },
@@ -311,7 +339,13 @@ export function useGeminiLive(): GeminiLiveControls {
     audioContextRef.current = audioContext;
     if (audioContext.state === "suspended") await audioContext.resume();
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
     const source = audioContext.createMediaStreamSource(stream);
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
     const silentGain = audioContext.createGain();
@@ -322,6 +356,19 @@ export function useGeminiLive(): GeminiLiveControls {
       if (!session) return;
 
       const input = event.inputBuffer.getChannelData(0);
+      if (playbackSourcesRef.current.size > 0) {
+        let energy = 0;
+        for (let i = 0; i < input.length; i++) {
+          energy += input[i] * input[i];
+        }
+        const rms = Math.sqrt(energy / input.length);
+        const now = audioContext.currentTime;
+        if (rms > 0.035 && now - lastLocalBargeInRef.current > 0.3) {
+          lastLocalBargeInRef.current = now;
+          stopPlayback();
+        }
+      }
+
       const pcm = downsampleToPcm16(input, audioContext.sampleRate);
       session.sendRealtimeInput({
         audio: {
@@ -341,7 +388,7 @@ export function useGeminiLive(): GeminiLiveControls {
     silentGainRef.current = silentGain;
 
     setState((prev) => ({ ...prev, status: "connected", muted: false, error: null }));
-  }, []);
+  }, [stopPlayback]);
 
   const toggleMute = useCallback(async () => {
     if (!sessionRef.current) {
@@ -404,6 +451,7 @@ export function useGeminiLive(): GeminiLiveControls {
 
   const disconnect = useCallback(() => {
     manualDisconnectRef.current = true;
+    stopPlayback();
     stopMic();
     try {
       sessionRef.current?.close();
@@ -424,7 +472,7 @@ export function useGeminiLive(): GeminiLiveControls {
       turnCount: 0,
       whiteboardSyncedAt: null,
     }));
-  }, [stopMic]);
+  }, [stopMic, stopPlayback]);
 
   useEffect(() => disconnect, [disconnect]);
 

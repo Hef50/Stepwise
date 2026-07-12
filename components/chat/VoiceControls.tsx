@@ -22,7 +22,7 @@ function VoiceControlsInner({ voice, textToRead }: VoiceControlsProps) {
     startListening,
     stopListening,
     cancelSpeech,
-    speak,
+    toggleSound,
     setVoiceSpeed,
   } = voice;
 
@@ -87,35 +87,31 @@ function VoiceControlsInner({ voice, textToRead }: VoiceControlsProps) {
               variant="ghost"
               size="icon"
               onClick={() => {
-                if (isSpeaking) {
+                if (state.soundEnabled) {
                   cancelSpeech();
-                  return;
                 }
-
-                if (textToRead?.trim()) {
-                  speak(textToRead);
-                }
+                toggleSound();
               }}
-              disabled={!isSpeaking && !canReadAnswer}
-              aria-label={isSpeaking ? "Stop reading AI answer" : "Read AI answer aloud"}
+              disabled={!isSpeaking && !canReadAnswer && state.soundEnabled}
+              aria-label={state.soundEnabled ? "Mute AI voice" : "Unmute AI voice"}
               className={cn(
                 "transition-colors",
+                !state.soundEnabled &&
+                  "bg-muted text-muted-foreground",
                 !canReadAnswer &&
                   !isSpeaking &&
+                  state.soundEnabled &&
                   "text-muted-foreground",
                 isSpeaking &&
+                  state.soundEnabled &&
                   "bg-blue-100 text-blue-600 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-400"
               )}
             >
-              {isSpeaking ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
+              {state.soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
             </Button>
           </TooltipTrigger>
           <TooltipContent>
-            {isSpeaking
-              ? "Stop reading"
-              : canReadAnswer
-              ? "Read latest AI answer aloud"
-              : "No AI answer to read yet"}
+            {state.soundEnabled ? "Mute AI voice" : "Unmute AI voice"}
           </TooltipContent>
         </Tooltip>
       )}

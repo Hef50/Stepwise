@@ -61,6 +61,7 @@ export interface VoiceControls {
   stopListening: () => void;
   speak: (text: string) => void;
   preloadSpeech: (text: string) => void;
+  enqueueSpeech: (text: string) => void;
   cancelSpeech: () => void;
   toggleSound: () => void;
   toggleNativeVoiceMode: () => void;

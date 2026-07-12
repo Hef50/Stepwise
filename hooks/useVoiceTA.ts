@@ -123,6 +123,11 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
   const utteranceQueueRef = useRef<SpeechSynthesisUtterance[]>([]);
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  const audioQueueRef = useRef<SpeechAudio[]>([]);
+  const pendingSpeechTextRef = useRef<string[]>([]);
+  const processingSpeechQueueRef = useRef(false);
+  const queuedSpeechTextRef = useRef<Set<string>>(new Set());
+  const ttsQuotaBlockedRef = useRef(false);
   const cachedAudioRef = useRef<SpeechAudio | null>(null);
   const preloadRequestRef = useRef<string | null>(null);
   const finalTranscriptRef = useRef<string>("");
@@ -188,6 +193,15 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     cachedAudioRef.current = null;
   }, []);
 
+  const stopGeneratedAudio = useCallback(() => {
+    audioElementRef.current?.pause();
+    audioElementRef.current = null;
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     const handleClearVoiceData = () => {
       clearSilenceTimer();
@@ -201,19 +215,25 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     };
 
     window.addEventListener("stepwise:clear-voice-data", handleClearVoiceData);
+    const queuedSpeechText = queuedSpeechTextRef.current;
 
     return () => {
       window.removeEventListener("stepwise:clear-voice-data", handleClearVoiceData);
       recognitionRef.current?.abort();
-      audioElementRef.current?.pause();
-      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+      stopGeneratedAudio();
+      audioQueueRef.current.forEach((audio) => URL.revokeObjectURL(audio.audioUrl));
+      audioQueueRef.current = [];
+      pendingSpeechTextRef.current = [];
+      processingSpeechQueueRef.current = false;
+      queuedSpeechText.clear();
+      ttsQuotaBlockedRef.current = false;
       clearCachedAudio();
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current as ReturnType<typeof setTimeout>);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current as ReturnType<typeof setTimeout>);
       if (speechStartTimerRef.current) clearTimeout(speechStartTimerRef.current);
       if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
     };
-  }, [clearCachedAudio, clearSilenceTimer]);
+  }, [clearCachedAudio, clearSilenceTimer, stopGeneratedAudio]);
 
   const fetchSpeechAudio = useCallback(async (spokenText: string): Promise<SpeechAudio> => {
     const response = await fetch("/api/tts", {
@@ -224,7 +244,9 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
 
     if (!response.ok) {
       const data = (await response.json().catch(() => null)) as { error?: string } | null;
-      throw new Error(data?.error ?? `TTS request failed: ${response.status}`);
+      const error = new Error(data?.error ?? `TTS request failed: ${response.status}`);
+      error.name = response.status === 429 ? "TTSQuotaError" : "TTSError";
+      throw error;
     }
 
     const data = (await response.json()) as {
@@ -245,6 +267,146 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       text: spokenText,
     };
   }, []);
+
+  const playSpeechAudio = useCallback((speechAudio: SpeechAudio) => {
+    stopGeneratedAudio();
+
+    const audio = new Audio(speechAudio.audioUrl);
+    audioElementRef.current = audio;
+    audioUrlRef.current = speechAudio.audioUrl;
+    audio.playbackRate = Math.max(0.5, Math.min(2.0, loadSettings().talkingSpeed ?? 1));
+    audio.onplaying = () => {
+      setState((prev) => ({
+        ...prev,
+        mode: "speaking",
+        error: null,
+        ttsStatus: `Playing Gemini speech audio${speechAudio.model ? ` (${speechAudio.model})` : ""}.`,
+      }));
+    };
+    audio.onended = () => {
+      stopGeneratedAudio();
+      const nextAudio = audioQueueRef.current.shift();
+      if (nextAudio) {
+        playSpeechAudio(nextAudio);
+        return;
+      }
+
+      setState((prev) => ({
+        ...prev,
+        mode: "idle",
+        ttsStatus: ttsQuotaBlockedRef.current
+          ? "Gemini TTS quota reached; text response will continue without audio."
+          : "Finished Gemini speech audio.",
+      }));
+    };
+    audio.onerror = () => {
+      stopGeneratedAudio();
+      audioQueueRef.current.forEach((queuedAudio) => URL.revokeObjectURL(queuedAudio.audioUrl));
+      audioQueueRef.current = [];
+      queuedSpeechTextRef.current.clear();
+      setState((prev) => ({
+        ...prev,
+        mode: "error",
+        error: "Generated speech audio could not be played.",
+        ttsStatus: "Generated speech audio could not be played.",
+      }));
+    };
+
+    void audio.play().catch((err: unknown) => {
+      stopGeneratedAudio();
+      setState((prev) => ({
+        ...prev,
+        mode: "error",
+        error: err instanceof Error ? err.message : "Generated speech audio could not be played.",
+        ttsStatus:
+          err instanceof Error ? `Generated speech audio could not be played: ${err.message}` : "Generated speech audio could not be played.",
+      }));
+    });
+  }, [stopGeneratedAudio]);
+
+  const processSpeechQueue = useCallback(async () => {
+    if (processingSpeechQueueRef.current) return;
+    processingSpeechQueueRef.current = true;
+
+    try {
+      while (
+        pendingSpeechTextRef.current.length > 0 &&
+        soundEnabledRef.current &&
+        !ttsQuotaBlockedRef.current
+      ) {
+        const spokenText = pendingSpeechTextRef.current.shift();
+        if (!spokenText) continue;
+
+        setState((prev) => ({
+          ...prev,
+          ttsStatus: "Preparing live response audio...",
+        }));
+
+        try {
+          const speechAudio = await fetchSpeechAudio(spokenText);
+          queuedSpeechTextRef.current.delete(spokenText);
+
+          if (!soundEnabledRef.current) {
+            URL.revokeObjectURL(speechAudio.audioUrl);
+            continue;
+          }
+
+          setState((prev) => ({
+            ...prev,
+            mode: "speaking",
+            error: null,
+            soundEnabled: true,
+            ttsStatus: "Live response audio ready.",
+          }));
+
+          if (audioElementRef.current) {
+            audioQueueRef.current.push(speechAudio);
+          } else {
+            playSpeechAudio(speechAudio);
+          }
+        } catch (err) {
+          queuedSpeechTextRef.current.delete(spokenText);
+          if (
+            err instanceof Error &&
+            (err.name === "TTSQuotaError" || /quota|429|rate limit/i.test(err.message))
+          ) {
+            ttsQuotaBlockedRef.current = true;
+            pendingSpeechTextRef.current = [];
+            queuedSpeechTextRef.current.clear();
+            setState((prev) => ({
+              ...prev,
+              ttsStatus:
+                "Gemini TTS quota reached; text response will continue without audio.",
+            }));
+            break;
+          }
+
+          setState((prev) => ({
+            ...prev,
+            ttsStatus:
+              err instanceof Error
+                ? `Gemini live TTS failed: ${err.message}`
+                : "Gemini live TTS failed.",
+          }));
+        }
+      }
+    } finally {
+      processingSpeechQueueRef.current = false;
+    }
+  }, [fetchSpeechAudio, playSpeechAudio]);
+
+  const enqueueSpeech = useCallback(
+    (text: string) => {
+      const spokenText = normalizeSpeechText(text);
+      if (!spokenText || !soundEnabledRef.current || ttsQuotaBlockedRef.current) return;
+      if (queuedSpeechTextRef.current.has(spokenText)) return;
+
+      queuedSpeechTextRef.current.add(spokenText);
+      pendingSpeechTextRef.current.push(spokenText);
+      void processSpeechQueue();
+    },
+    [processSpeechQueue]
+  );
 
   const preloadSpeech = useCallback(
     async (text: string) => {
@@ -486,14 +648,12 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     }
 
     try {
-      if (audioElementRef.current) {
-        audioElementRef.current.pause();
-        audioElementRef.current = null;
-      }
-      if (audioUrlRef.current) {
-        URL.revokeObjectURL(audioUrlRef.current);
-        audioUrlRef.current = null;
-      }
+      stopGeneratedAudio();
+      audioQueueRef.current.forEach((audio) => URL.revokeObjectURL(audio.audioUrl));
+      audioQueueRef.current = [];
+      pendingSpeechTextRef.current = [];
+      queuedSpeechTextRef.current.clear();
+      ttsQuotaBlockedRef.current = false;
 
       const entry = createTranscriptEntry("assistant", spokenText);
       const cachedAudio =
@@ -514,42 +674,7 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       }));
 
       const speechAudio = cachedAudio ?? (await fetchSpeechAudio(spokenText));
-      const audioUrl = speechAudio.audioUrl;
-      const audio = new Audio(audioUrl);
-      audioElementRef.current = audio;
-      audioUrlRef.current = audioUrl;
-      audio.playbackRate = Math.max(0.5, Math.min(2.0, loadSettings().talkingSpeed ?? 1));
-      audio.onplaying = () => {
-        setState((prev) => ({
-          ...prev,
-          mode: "speaking",
-          error: null,
-          ttsStatus: `Playing Gemini speech audio${speechAudio.model ? ` (${speechAudio.model})` : ""}.`,
-        }));
-      };
-      audio.onended = () => {
-        if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
-        audioUrlRef.current = null;
-        audioElementRef.current = null;
-        setState((prev) => ({
-          ...prev,
-          mode: "idle",
-          ttsStatus: "Finished Gemini speech audio.",
-        }));
-      };
-      audio.onerror = () => {
-        if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
-        audioUrlRef.current = null;
-        audioElementRef.current = null;
-        setState((prev) => ({
-          ...prev,
-          mode: "error",
-          error: "Generated speech audio could not be played.",
-          ttsStatus: "Generated speech audio could not be played.",
-        }));
-      };
-
-      await audio.play();
+      playSpeechAudio(speechAudio);
       return;
     } catch (err) {
       setState((prev) => ({
@@ -693,15 +818,15 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
 
     speakQueuedChunk();
     speechStartTimerRef.current = window.setTimeout(retryFirstChunk, 600);
-  }, [clearSilenceTimer, fetchSpeechAudio]);
+  }, [clearSilenceTimer, fetchSpeechAudio, playSpeechAudio, stopGeneratedAudio]);
 
   const cancelSpeech = useCallback(() => {
-    audioElementRef.current?.pause();
-    audioElementRef.current = null;
-    if (audioUrlRef.current) {
-      URL.revokeObjectURL(audioUrlRef.current);
-      audioUrlRef.current = null;
-    }
+    stopGeneratedAudio();
+    audioQueueRef.current.forEach((audio) => URL.revokeObjectURL(audio.audioUrl));
+    audioQueueRef.current = [];
+    pendingSpeechTextRef.current = [];
+    queuedSpeechTextRef.current.clear();
+    ttsQuotaBlockedRef.current = false;
     if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
     utteranceQueueRef.current = [];
     if (speechStartTimerRef.current) {
@@ -710,7 +835,7 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     }
     utteranceRef.current = null;
     setState((prev) => ({ ...prev, mode: "idle" }));
-  }, []);
+  }, [stopGeneratedAudio]);
 
   const toggleSound = useCallback(() => {
     setState((prev) => {
@@ -718,13 +843,21 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       soundEnabledRef.current = nextSoundEnabled;
       saveSettings({ ttsEnabled: nextSoundEnabled });
 
-      if (!nextSoundEnabled && isSpeechSynthesisSupported()) {
-        window.speechSynthesis.cancel();
+      if (!nextSoundEnabled) {
+        stopGeneratedAudio();
+        audioQueueRef.current.forEach((audio) => URL.revokeObjectURL(audio.audioUrl));
+        audioQueueRef.current = [];
+        pendingSpeechTextRef.current = [];
+        queuedSpeechTextRef.current.clear();
+        ttsQuotaBlockedRef.current = false;
+        if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
         if (speechStartTimerRef.current) {
           clearTimeout(speechStartTimerRef.current);
           speechStartTimerRef.current = null;
         }
         utteranceRef.current = null;
+      } else {
+        ttsQuotaBlockedRef.current = false;
       }
 
       return {
@@ -733,7 +866,7 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
         mode: nextSoundEnabled ? prev.mode : "idle",
       };
     });
-  }, []);
+  }, [stopGeneratedAudio]);
 
   const toggleNativeVoiceMode = useCallback(() => {
     setState((prev) => ({ ...prev, nativeVoiceModeEnabled: !prev.nativeVoiceModeEnabled }));
@@ -763,6 +896,7 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     stopListening,
     speak,
     preloadSpeech,
+    enqueueSpeech,
     cancelSpeech,
     toggleSound,
     toggleNativeVoiceMode,

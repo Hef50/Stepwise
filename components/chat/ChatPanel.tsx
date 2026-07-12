@@ -27,6 +27,74 @@ interface ChatPanelProps {
 }
 
 const WHITEBOARD_VISION_PROMPT = `Analyze the provided whiteboard image for an AI tutor in a live session. Identify every equation, variable, symbol, diagram, graph, and written work shown. Transcribe mathematical notation exactly as written. Do not solve the problem yet; provide concise visual context the tutor can use to answer the student's question.`;
+const MIN_STREAM_SPEECH_CHARS = 450;
+const MAX_SPEECH_CHARS = 900;
+
+function splitSpeechBlocks(text: string): string[] {
+  const blocks: string[] = [];
+  let remaining = text.trim();
+
+  while (remaining.length > 0) {
+    if (remaining.length <= MAX_SPEECH_CHARS) {
+      blocks.push(remaining);
+      break;
+    }
+
+    const slice = remaining.slice(0, MAX_SPEECH_CHARS);
+    const sentenceEnd = Math.max(
+      slice.lastIndexOf(". "),
+      slice.lastIndexOf("? "),
+      slice.lastIndexOf("! ")
+    );
+    const breakAt =
+      sentenceEnd >= MIN_STREAM_SPEECH_CHARS
+        ? sentenceEnd + 1
+        : Math.max(slice.lastIndexOf(" "), MIN_STREAM_SPEECH_CHARS);
+
+    blocks.push(remaining.slice(0, breakAt).trim());
+    remaining = remaining.slice(breakAt).trim();
+  }
+
+  return blocks.filter(Boolean);
+}
+
+function getReadySpeechSegments(
+  text: string,
+  startIndex: number,
+  includeTail: boolean
+): { nextIndex: number; segments: string[] } {
+  const remaining = text.slice(startIndex);
+  if (!remaining.trim()) return { nextIndex: startIndex, segments: [] };
+
+  if (includeTail) {
+    const segments = splitSpeechBlocks(remaining);
+    return {
+      nextIndex: text.length,
+      segments,
+    };
+  }
+
+  if (remaining.trim().length < MIN_STREAM_SPEECH_CHARS) {
+    return { nextIndex: startIndex, segments: [] };
+  }
+
+  const windowText = remaining.slice(0, MAX_SPEECH_CHARS);
+  const sentenceMatches = [...windowText.matchAll(/[^.!?]+[.!?]+(?=\s|$)/g)];
+  const candidateEnd = sentenceMatches.reduce((best, match) => {
+    const end = (match.index ?? 0) + match[0].length;
+    return end >= MIN_STREAM_SPEECH_CHARS ? end : best;
+  }, 0);
+
+  if (candidateEnd === 0) {
+    return { nextIndex: startIndex, segments: [] };
+  }
+
+  const segment = remaining.slice(0, candidateEnd).trim();
+  return {
+    nextIndex: startIndex + candidateEnd,
+    segments: segment ? [segment] : [],
+  };
+}
 
 async function analyzeVisualContext(
   question: string,
@@ -54,6 +122,8 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const [isPreparingContext, setIsPreparingContext] = useState(false);
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("text");
   const lastWhiteboardCaptureRef = useRef<string | null>(null);
+  const autoSpeechMessageRef = useRef<string | null>(null);
+  const autoSpeechCursorRef = useRef(0);
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
   const live = useGeminiLive();
   const {
@@ -116,7 +186,7 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
       submitText(transcript);
     }, 80);
   });
-  const { cancelSpeech, preloadSpeech, stopListening } = voice;
+  const { cancelSpeech, enqueueSpeech, stopListening } = voice;
 
   useEffect(() => {
     if (interactionMode !== "mixed") {
@@ -162,34 +232,60 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
     [input, submitText]
   );
 
-  const latestAssistantText = useMemo(() => {
+  const latestAssistant = useMemo(() => {
     const latestAssistantMessage = [...messages]
       .reverse()
       .find((message) => message.role === "assistant");
 
-    return latestAssistantMessage?.parts
+    const text = latestAssistantMessage?.parts
       .filter((part) => part.type === "text")
       .map((part) => (part.type === "text" ? part.text : ""))
       .join("") ?? "";
+
+    return {
+      id: latestAssistantMessage?.id ?? null,
+      text,
+    };
   }, [messages]);
+
+  const latestAssistantText = latestAssistant.text;
 
   useEffect(() => {
     if (
       interactionMode !== "mixed" ||
-      isGenerating ||
       isPreparingContext ||
-      !latestAssistantText
+      !latestAssistant.text ||
+      !voice.state.soundEnabled
     ) {
       return;
     }
 
-    preloadSpeech(latestAssistantText);
+    if (latestAssistant.id && latestAssistant.id !== autoSpeechMessageRef.current) {
+      autoSpeechMessageRef.current = latestAssistant.id;
+      autoSpeechCursorRef.current = 0;
+    }
+
+    if (autoSpeechCursorRef.current > latestAssistant.text.length) {
+      autoSpeechCursorRef.current = 0;
+    }
+
+    const { nextIndex, segments } = getReadySpeechSegments(
+      latestAssistant.text,
+      autoSpeechCursorRef.current,
+      !isGenerating
+    );
+    if (segments.length === 0) return;
+
+    segments.forEach((segment) => enqueueSpeech(segment));
+    autoSpeechCursorRef.current = nextIndex;
   }, [
+    enqueueSpeech,
     interactionMode,
     isGenerating,
     isPreparingContext,
-    latestAssistantText,
-    preloadSpeech,
+    latestAssistant.id,
+    latestAssistant.text,
+    voice.state.soundEnabled,
   ]);
 
   const shareWhiteboardWithLive = useCallback(

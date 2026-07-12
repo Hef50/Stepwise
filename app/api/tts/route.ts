@@ -104,14 +104,14 @@ export async function POST(request: Request): Promise<Response> {
     });
   } catch (err) {
     console.error("[tts] Gemini TTS error:", err);
+    const errorMessage = err instanceof Error ? err.message : "Gemini TTS failed.";
+    const status = /quota|429|rate limit/i.test(errorMessage) ? 429 : 500;
+
     return Response.json(
       {
-        error:
-          err instanceof Error
-            ? `Gemini TTS failed: ${err.message}`
-            : "Gemini TTS failed.",
+        error: `Gemini TTS failed: ${errorMessage}`,
       },
-      { status: 500 }
+      { status }
     );
   }
 }
