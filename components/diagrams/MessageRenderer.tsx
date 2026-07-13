@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { parseMessageBlocks } from "@/lib/markdown/parseBlocks";
 import {
   segmentTextWithEquations,
@@ -19,6 +21,102 @@ interface MessageRendererProps {
   /** Pair with readyEquations during live reveal to hide undrawn math. */
   hideUntilReady?: boolean;
 }
+
+// ─── Markdown element styles (chat bubble) ────────────────────────────────────
+
+const markdownComponents: Components = {
+  h1: ({ children }) => (
+    <h1 className="mb-2 mt-3 text-base font-semibold leading-snug first:mt-0">
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className="mb-2 mt-3 text-sm font-semibold leading-snug first:mt-0">
+      {children}
+    </h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className="mb-1.5 mt-2.5 text-sm font-semibold leading-snug first:mt-0">
+      {children}
+    </h3>
+  ),
+  h4: ({ children }) => (
+    <h4 className="mb-1.5 mt-2 text-sm font-semibold leading-snug first:mt-0">
+      {children}
+    </h4>
+  ),
+  h5: ({ children }) => (
+    <h5 className="mb-1 mt-2 text-sm font-medium leading-snug first:mt-0">
+      {children}
+    </h5>
+  ),
+  h6: ({ children }) => (
+    <h6 className="mb-1 mt-2 text-sm font-medium leading-snug first:mt-0">
+      {children}
+    </h6>
+  ),
+  p: ({ children }) => (
+    <p className="mb-2 leading-relaxed last:mb-0">{children}</p>
+  ),
+  strong: ({ children }) => (
+    <strong className="font-semibold">{children}</strong>
+  ),
+  em: ({ children }) => <em className="italic">{children}</em>,
+  ul: ({ children }) => (
+    <ul className="mb-2 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="mb-2 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>
+  ),
+  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+  a: ({ href, children }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="underline underline-offset-2 hover:opacity-80"
+    >
+      {children}
+    </a>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="mb-2 border-l-2 border-border/80 pl-3 italic opacity-90 last:mb-0">
+      {children}
+    </blockquote>
+  ),
+  hr: () => <hr className="my-3 border-border/60" />,
+  code: ({ className, children }) => {
+    const isBlock = Boolean(className?.includes("language-"));
+    if (isBlock) {
+      return <code className={className}>{children}</code>;
+    }
+    return (
+      <code className="rounded bg-muted/80 px-1 py-0.5 font-mono text-[0.85em]">
+        {children}
+      </code>
+    );
+  },
+  pre: ({ children }) => (
+    <pre className="mb-2 overflow-x-auto rounded-md bg-muted/80 p-3 font-mono text-xs leading-relaxed last:mb-0">
+      {children}
+    </pre>
+  ),
+  table: ({ children }) => (
+    <div className="mb-2 overflow-x-auto last:mb-0">
+      <table className="w-full border-collapse text-left text-xs">
+        {children}
+      </table>
+    </div>
+  ),
+  thead: ({ children }) => <thead className="border-b border-border">{children}</thead>,
+  th: ({ children }) => (
+    <th className="px-2 py-1.5 font-semibold">{children}</th>
+  ),
+  td: ({ children }) => (
+    <td className="border-t border-border/60 px-2 py-1.5">{children}</td>
+  ),
+  del: ({ children }) => <del className="opacity-70 line-through">{children}</del>,
+};
 
 // ─── Equation card ────────────────────────────────────────────────────────────
 
@@ -84,11 +182,13 @@ function TextBlock({
           );
         }
         return (
-          <div
-            key={i}
-            className="prose prose-sm max-w-none dark:prose-invert whitespace-pre-wrap leading-relaxed"
-          >
-            {seg.content}
+          <div key={i} className="min-w-0 break-words leading-relaxed">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={markdownComponents}
+            >
+              {seg.content}
+            </ReactMarkdown>
           </div>
         );
       })}
