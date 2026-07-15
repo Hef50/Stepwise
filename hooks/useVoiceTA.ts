@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { loadSettings, saveSettings } from "@/lib/settings";
 import { stripMarkdownForSpeech } from "@/lib/speech";
-import type { VoiceControls, VoiceState, VoiceTranscriptEntry } from "@/lib/types";
+import type {
+  VoiceControls,
+  VoiceMode,
+  VoiceState,
+  VoiceTranscriptEntry,
+} from "@/lib/types";
 
 /**
  * useVoiceTA — Provider-agnostic voice hook.
@@ -202,6 +207,24 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     }
   }, []);
 
+  const waitForGeneratedAudioToFinish = useCallback((): Promise<void> => {
+    if (!audioElementRef.current && audioQueueRef.current.length === 0) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      const poll = window.setInterval(() => {
+        if (
+          !soundEnabledRef.current ||
+          (!audioElementRef.current && audioQueueRef.current.length === 0)
+        ) {
+          window.clearInterval(poll);
+          resolve();
+        }
+      }, 100);
+    });
+  }, []);
+
   useEffect(() => {
     const handleClearVoiceData = () => {
       clearSilenceTimer();
@@ -324,6 +347,198 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     });
   }, [stopGeneratedAudio]);
 
+  const speakWithBrowserFallback = useCallback(
+    async (spokenText: string, initialStatus: string): Promise<void> => {
+      if (!isSpeechSynthesisSupported() || !soundEnabledRef.current) {
+        setState((prev) => ({
+          ...prev,
+          mode: "error",
+          error: "Speech synthesis is not supported in this browser.",
+          ttsStatus: "Browser fallback TTS is not supported here.",
+        }));
+        return Promise.resolve();
+      }
+
+      if (audioElementRef.current || audioQueueRef.current.length > 0) {
+        setState((prev) => ({
+          ...prev,
+          ttsStatus: `${initialStatus} Browser fallback will continue after queued Gemini audio.`,
+        }));
+        await waitForGeneratedAudioToFinish();
+      }
+
+      if (!soundEnabledRef.current) return;
+
+      stopGeneratedAudio();
+      audioQueueRef.current.forEach((audio) => URL.revokeObjectURL(audio.audioUrl));
+      audioQueueRef.current = [];
+
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+        window.speechSynthesis.cancel();
+      }
+
+      const chunks = splitSpeechIntoChunks(spokenText);
+      if (chunks.length === 0) return Promise.resolve();
+
+      const settings = loadSettings();
+      const voices = window.speechSynthesis.getVoices();
+      const preferredVoice =
+        voices.find((voice) => voice.lang.toLowerCase().startsWith("en")) ?? null;
+
+      return new Promise((resolve) => {
+        let settled = false;
+        let currentChunkStarted = false;
+        let startAttempt = 0;
+
+        const finish = (mode: VoiceMode, ttsStatus: string, error: string | null = null) => {
+          if (settled) return;
+          settled = true;
+          utteranceQueueRef.current = [];
+          utteranceRef.current = null;
+          if (speechStartTimerRef.current) {
+            clearTimeout(speechStartTimerRef.current);
+            speechStartTimerRef.current = null;
+          }
+          setState((prev) => ({
+            ...prev,
+            mode,
+            error,
+            ttsStatus,
+          }));
+          resolve();
+        };
+
+        const createUtterance = (chunk: string) => {
+          const utterance = new SpeechSynthesisUtterance(chunk);
+          utterance.lang = preferredVoice?.lang ?? "en-US";
+          utterance.voice = preferredVoice;
+          utterance.rate = Math.max(0.5, Math.min(2.0, settings.talkingSpeed ?? 1));
+          utterance.pitch = 1.0;
+          utterance.volume = 1.0;
+          return utterance;
+        };
+
+        const speakQueuedChunk = () => {
+          if (!soundEnabledRef.current) {
+            finish("idle", "Speech canceled.");
+            return;
+          }
+
+          const utterance = utteranceQueueRef.current.shift();
+          if (!utterance) {
+            finish("idle", "Finished browser fallback speech.");
+            return;
+          }
+
+          currentChunkStarted = false;
+          startAttempt = 0;
+          utteranceRef.current = utterance;
+          window.setTimeout(() => {
+            if (settled || utteranceRef.current !== utterance) return;
+            window.speechSynthesis.speak(utterance);
+            window.speechSynthesis.resume();
+            if (speechStartTimerRef.current) {
+              clearTimeout(speechStartTimerRef.current);
+            }
+            speechStartTimerRef.current = window.setTimeout(
+              retryIfSpeechDoesNotStart,
+              1200
+            );
+          }, 0);
+        };
+
+        const utterances = chunks.map((chunk) => {
+          const utterance = createUtterance(chunk);
+          utterance.onstart = () => {
+            currentChunkStarted = true;
+            if (speechStartTimerRef.current) {
+              clearTimeout(speechStartTimerRef.current);
+              speechStartTimerRef.current = null;
+            }
+            setState((prev) => ({
+              ...prev,
+              mode: "speaking",
+              error: null,
+              ttsStatus: `Using browser fallback voice (${utterance.voice?.name ?? "default voice"}).`,
+            }));
+          };
+          utterance.onend = speakQueuedChunk;
+          utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
+            if (event.error === "interrupted" || event.error === "canceled") {
+              finish("idle", `Speech ${event.error}.`);
+              return;
+            }
+
+            finish(
+              "error",
+              `Browser fallback speech error: ${event.error}`,
+              `Browser fallback speech error: ${event.error}`
+            );
+          };
+          return utterance;
+        });
+
+        utteranceQueueRef.current = utterances;
+        setState((prev) => ({
+          ...prev,
+          mode: "speaking",
+          error: null,
+          soundEnabled: true,
+          ttsStatus: `${initialStatus} Browser fallback queued: ${chunks.length} chunk${
+            chunks.length === 1 ? "" : "s"
+          }, ${voices.length} voice${voices.length === 1 ? "" : "s"} available.`,
+        }));
+
+        speakQueuedChunk();
+        const retryIfSpeechDoesNotStart = () => {
+          if (settled || currentChunkStarted || !utteranceRef.current) {
+            return;
+          }
+
+          if (startAttempt >= 2) {
+            finish(
+              "error",
+              "Browser fallback speech could not start. Click mute/unmute once, then try again.",
+              "Browser fallback speech could not start."
+            );
+            return;
+          }
+
+          startAttempt += 1;
+          const retryText = utteranceRef.current.text;
+          setState((prev) => ({
+            ...prev,
+            ttsStatus: `Browser fallback did not start; retrying (${startAttempt}/2).`,
+          }));
+
+          window.speechSynthesis.cancel();
+          const retryUtterance = createUtterance(retryText);
+          retryUtterance.onstart = utteranceRef.current.onstart;
+          retryUtterance.onend = utteranceRef.current.onend;
+          retryUtterance.onerror = utteranceRef.current.onerror;
+          utteranceRef.current = retryUtterance;
+
+          window.setTimeout(() => {
+            if (settled || currentChunkStarted || utteranceRef.current !== retryUtterance) {
+              return;
+            }
+            window.speechSynthesis.resume();
+            window.speechSynthesis.speak(retryUtterance);
+            if (speechStartTimerRef.current) {
+              clearTimeout(speechStartTimerRef.current);
+            }
+            speechStartTimerRef.current = window.setTimeout(
+              retryIfSpeechDoesNotStart,
+              1200
+            );
+          }, 250);
+        };
+
+      });
+    },
+    [stopGeneratedAudio, waitForGeneratedAudioToFinish]
+  );
+
   const processSpeechQueue = useCallback(async () => {
     if (processingSpeechQueueRef.current) return;
     processingSpeechQueueRef.current = true;
@@ -331,11 +546,19 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     try {
       while (
         pendingSpeechTextRef.current.length > 0 &&
-        soundEnabledRef.current &&
-        !ttsQuotaBlockedRef.current
+        soundEnabledRef.current
       ) {
         const spokenText = pendingSpeechTextRef.current.shift();
         if (!spokenText) continue;
+
+        if (ttsQuotaBlockedRef.current) {
+          queuedSpeechTextRef.current.delete(spokenText);
+          await speakWithBrowserFallback(
+            spokenText,
+            "Gemini TTS quota reached;"
+          );
+          continue;
+        }
 
         setState((prev) => ({
           ...prev,
@@ -371,14 +594,16 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
             (err.name === "TTSQuotaError" || /quota|429|rate limit/i.test(err.message))
           ) {
             ttsQuotaBlockedRef.current = true;
-            pendingSpeechTextRef.current = [];
-            queuedSpeechTextRef.current.clear();
             setState((prev) => ({
               ...prev,
               ttsStatus:
-                "Gemini TTS quota reached; text response will continue without audio.",
+                "Gemini TTS quota reached; switching to browser fallback voice.",
             }));
-            break;
+            await speakWithBrowserFallback(
+              spokenText,
+              "Gemini TTS quota reached;"
+            );
+            continue;
           }
 
           setState((prev) => ({
@@ -393,12 +618,12 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     } finally {
       processingSpeechQueueRef.current = false;
     }
-  }, [fetchSpeechAudio, playSpeechAudio]);
+  }, [fetchSpeechAudio, playSpeechAudio, speakWithBrowserFallback]);
 
   const enqueueSpeech = useCallback(
     (text: string) => {
       const spokenText = normalizeSpeechText(text);
-      if (!spokenText || !soundEnabledRef.current || ttsQuotaBlockedRef.current) return;
+      if (!spokenText || !soundEnabledRef.current) return;
       if (queuedSpeechTextRef.current.has(spokenText)) return;
 
       queuedSpeechTextRef.current.add(spokenText);
