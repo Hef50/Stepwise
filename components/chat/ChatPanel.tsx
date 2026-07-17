@@ -29,6 +29,11 @@ interface ChatPanelProps {
 const WHITEBOARD_VISION_PROMPT = `Analyze the provided whiteboard image for an AI tutor in a live session. Identify every equation, variable, symbol, diagram, graph, and written work shown. Transcribe mathematical notation exactly as written. Do not solve the problem yet; provide concise visual context the tutor can use to answer the student's question.`;
 const MIN_STREAM_SPEECH_CHARS = 450;
 const MAX_SPEECH_CHARS = 900;
+const MODE_MODEL_LABELS: Record<InteractionMode, string> = {
+  text: "LLM7 fast",
+  mixed: "LLM7 fast + Browser Speech",
+  audio: "Gemini 3 Live",
+};
 
 function splitSpeechBlocks(text: string): string[] {
   const blocks: string[] = [];
@@ -141,6 +146,7 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
 
   const isGenerating = status === "streaming" || status === "submitted";
   const isLoading = isGenerating || isPreparingContext;
+  const activeModelLabel = MODE_MODEL_LABELS[interactionMode];
 
   const submitText = useCallback(
     async (text: string) => {
@@ -425,40 +431,45 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
           </div>
 
           <div className="flex rounded-md border border-border bg-muted/40 p-1">
-              <Button
-                type="button"
-                variant={interactionMode === "text" ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setInteractionMode("text")}
-                aria-label="Text-only mode"
-                className="h-8 flex-1 px-2"
-              >
-                <Type className="h-4 w-4" />
-                Text
-              </Button>
-              <Button
-                type="button"
-                variant={interactionMode === "mixed" ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setInteractionMode("mixed")}
-                aria-label="Mixed mode"
-                className="h-8 flex-1 px-2"
-              >
-                <MessageCircle className="h-4 w-4" />
-                Mixed
-              </Button>
-              <Button
-                type="button"
-                variant={interactionMode === "audio" ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setInteractionMode("audio")}
-                aria-label="Audio-only mode"
-                className="h-8 flex-1 px-2"
-              >
-                <Mic2 className="h-4 w-4" />
-                Audio
-              </Button>
+            <Button
+              type="button"
+              variant={interactionMode === "text" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setInteractionMode("text")}
+              aria-label="Text-only mode"
+              className="h-8 flex-1 px-2"
+            >
+              <Type className="h-4 w-4" />
+              Text
+            </Button>
+            <Button
+              type="button"
+              variant={interactionMode === "mixed" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setInteractionMode("mixed")}
+              aria-label="Mixed mode"
+              className="h-8 flex-1 px-2"
+            >
+              <MessageCircle className="h-4 w-4" />
+              Mixed
+            </Button>
+            <Button
+              type="button"
+              variant={interactionMode === "audio" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setInteractionMode("audio")}
+              aria-label="Audio-only mode"
+              className="h-8 flex-1 px-2"
+            >
+              <Mic2 className="h-4 w-4" />
+              Audio
+            </Button>
           </div>
+
+          <p className="px-1 text-[11px] text-muted-foreground">
+            <span className="font-medium text-foreground">Model:</span>{" "}
+            {activeModelLabel}
+          </p>
         </div>
 
         <Separator />

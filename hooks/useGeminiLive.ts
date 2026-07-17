@@ -124,8 +124,8 @@ export function useGeminiLive(): GeminiLiveControls {
   const playbackSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const playbackTimeRef = useRef(0);
   const lastLocalBargeInRef = useRef(0);
-  const inputFinalRef = useRef("");
   const outputFinalRef = useRef("");
+  const lastInputCommittedRef = useRef("");
   const manualDisconnectRef = useRef(false);
 
   const appendTranscript = useCallback(
@@ -134,7 +134,7 @@ export function useGeminiLive(): GeminiLiveControls {
       if (!trimmed) return;
       setState((prev) => ({
         ...prev,
-        transcriptHistory: [...prev.transcriptHistory, createTranscriptEntry(role, trimmed)].slice(-12),
+        transcriptHistory: [...prev.transcriptHistory, createTranscriptEntry(role, trimmed)].slice(-100),
       }));
     },
     []
@@ -206,20 +206,30 @@ export function useGeminiLive(): GeminiLiveControls {
         stopPlayback();
       }
 
-      const inputText =
-        content.inputTranscription?.text ?? content.interimInputTranscription?.text ?? "";
+      const finalInputText = content.inputTranscription?.text?.trim() ?? "";
+      const interimInputText = content.interimInputTranscription?.text?.trim() ?? "";
+      const inputText = finalInputText || interimInputText;
       if (inputText) {
         stopPlayback();
-        setState((prev) => ({ ...prev, inputCaption: inputText }));
-        if (content.inputTranscription?.text) {
-          inputFinalRef.current += `${inputText} `;
+        if (finalInputText) {
+          if (finalInputText !== lastInputCommittedRef.current) {
+            appendTranscript("user", finalInputText);
+            lastInputCommittedRef.current = finalInputText;
+          }
+          setState((prev) => ({ ...prev, inputCaption: "" }));
+        } else {
+          setState((prev) => ({ ...prev, inputCaption: interimInputText }));
         }
       }
 
       const outputText = content.outputTranscription?.text ?? "";
       if (outputText) {
         outputFinalRef.current += `${outputText} `;
-        setState((prev) => ({ ...prev, outputCaption: outputFinalRef.current.trim() }));
+        setState((prev) => ({
+          ...prev,
+          inputCaption: "",
+          outputCaption: outputFinalRef.current.trim(),
+        }));
       }
 
       content.modelTurn?.parts?.forEach((part) => {
@@ -228,10 +238,9 @@ export function useGeminiLive(): GeminiLiveControls {
       });
 
       if (content.turnComplete) {
-        appendTranscript("user", inputFinalRef.current);
         appendTranscript("assistant", outputFinalRef.current);
-        inputFinalRef.current = "";
         outputFinalRef.current = "";
+        lastInputCommittedRef.current = "";
         setState((prev) => ({
           ...prev,
           inputCaption: "",
@@ -461,8 +470,8 @@ export function useGeminiLive(): GeminiLiveControls {
     sessionRef.current = null;
     void audioContextRef.current?.close();
     audioContextRef.current = null;
-    inputFinalRef.current = "";
     outputFinalRef.current = "";
+    lastInputCommittedRef.current = "";
     setState((prev) => ({
       ...prev,
       status: "idle",

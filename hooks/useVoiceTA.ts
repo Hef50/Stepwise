@@ -10,17 +10,9 @@ import type {
   VoiceTranscriptEntry,
 } from "@/lib/types";
 
-/**
- * useVoiceTA — Provider-agnostic voice hook.
- *
- * Internally uses the native Web Speech API (SpeechRecognition + speechSynthesis).
- * The public interface (VoiceControls) is deliberately abstract so this
- * implementation can be replaced with OpenAI Whisper/TTS without touching any
- * component that consumes it.
-
-*/
-
 const isBrowser = typeof window !== "undefined";
+const SPEECH_START_TIMEOUT_MS = 1200;
+const SPEECH_START_RETRIES = 2;
 
 type SpeechRecognitionLike = {
   abort: () => void;
@@ -37,13 +29,6 @@ type SpeechRecognitionLike = {
 };
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
-
-interface SpeechAudio {
-  audioUrl: string;
-  mimeType: string;
-  model?: string;
-  text: string;
-}
 
 function getSpeechRecognitionClass(): SpeechRecognitionConstructor | undefined {
   if (!isBrowser) return undefined;
@@ -92,15 +77,6 @@ function splitSpeechIntoChunks(text: string): string[] {
   return chunks;
 }
 
-function base64ToBlobUrl(base64: string, mimeType: string): string {
-  const binary = window.atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
-}
-
 function normalizeSpeechText(text: string): string {
   return stripMarkdownForSpeech(text).slice(0, 4000);
 }
@@ -117,7 +93,7 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     sttSupported: false,
     ttsSupported: false,
     ttsStatus: null,
-    soundEnabled: true,
+    soundEnabled: settings?.ttsEnabled ?? true,
     nativeVoiceModeEnabled: true,
     transcriptHistory: [],
     voiceSpeed: settings?.talkingSpeed ?? 1,
@@ -126,22 +102,19 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const utteranceQueueRef = useRef<SpeechSynthesisUtterance[]>([]);
-  const audioElementRef = useRef<HTMLAudioElement | null>(null);
-  const audioUrlRef = useRef<string | null>(null);
-  const audioQueueRef = useRef<SpeechAudio[]>([]);
   const pendingSpeechTextRef = useRef<string[]>([]);
-  const processingSpeechQueueRef = useRef(false);
   const queuedSpeechTextRef = useRef<Set<string>>(new Set());
-  const ttsQuotaBlockedRef = useRef(false);
-  const cachedAudioRef = useRef<SpeechAudio | null>(null);
-  const preloadRequestRef = useRef<string | null>(null);
-  const finalTranscriptRef = useRef<string>("");
+  const processingSpeechQueueRef = useRef(false);
+  const speechStartTimerRef = useRef<number | null>(null);
+  const finalTranscriptRef = useRef("");
   const errorTimerRef = useRef<unknown>(null);
   const silenceTimerRef = useRef<unknown>(null);
-  const speechStartTimerRef = useRef<number | null>(null);
   const finalizingRef = useRef(false);
+  const speechUnlockedRef = useRef(false);
+  const speechRunIdRef = useRef(0);
   const nativeVoiceModeRef = useRef(state.nativeVoiceModeEnabled);
   const soundEnabledRef = useRef(state.soundEnabled);
+  const voiceSpeedRef = useRef(state.voiceSpeed);
 
   useEffect(() => {
     nativeVoiceModeRef.current = state.nativeVoiceModeEnabled;
@@ -152,6 +125,30 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
   }, [state.soundEnabled]);
 
   useEffect(() => {
+    voiceSpeedRef.current = state.voiceSpeed;
+  }, [state.voiceSpeed]);
+
+  const clearSpeechStartTimer = useCallback(() => {
+    if (speechStartTimerRef.current) {
+      clearTimeout(speechStartTimerRef.current);
+      speechStartTimerRef.current = null;
+    }
+  }, []);
+
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current as ReturnType<typeof setTimeout>);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
+  const unlockSpeech = useCallback(() => {
+    if (!isSpeechSynthesisSupported()) return;
+    speechUnlockedRef.current = true;
+    window.speechSynthesis.resume();
+  }, []);
+
+  useEffect(() => {
     const sttSupported = getSpeechRecognitionClass() !== undefined;
     const ttsSupported = isSpeechSynthesisSupported();
     setState((prev) => ({
@@ -160,8 +157,8 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       ttsSupported,
       supported: sttSupported && ttsSupported,
       ttsStatus: ttsSupported
-        ? `Browser TTS ready; voices loaded: ${window.speechSynthesis.getVoices().length}`
-        : "Browser TTS is not supported here.",
+        ? `Browser speech ready; voices loaded: ${window.speechSynthesis.getVoices().length}`
+        : "Browser speech is not supported here.",
     }));
   }, []);
 
@@ -172,7 +169,7 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       const voices = window.speechSynthesis.getVoices();
       setState((prev) => ({
         ...prev,
-        ttsStatus: `Browser TTS ready; voices loaded: ${voices.length}`,
+        ttsStatus: `Browser speech ready; voices loaded: ${voices.length}`,
       }));
     };
 
@@ -183,47 +180,29 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     };
   }, []);
 
-  const clearSilenceTimer = useCallback(() => {
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current as ReturnType<typeof setTimeout>);
-      silenceTimerRef.current = null;
-    }
-  }, []);
+  useEffect(() => {
+    if (!isSpeechSynthesisSupported()) return;
 
-  const clearCachedAudio = useCallback(() => {
-    const cachedAudio = cachedAudioRef.current;
-    if (cachedAudio && cachedAudio.audioUrl !== audioUrlRef.current) {
-      URL.revokeObjectURL(cachedAudio.audioUrl);
-    }
-    cachedAudioRef.current = null;
-  }, []);
+    const handleUserActivation = () => unlockSpeech();
+    window.addEventListener("pointerdown", handleUserActivation, { capture: true });
+    window.addEventListener("keydown", handleUserActivation, { capture: true });
 
-  const stopGeneratedAudio = useCallback(() => {
-    audioElementRef.current?.pause();
-    audioElementRef.current = null;
-    if (audioUrlRef.current) {
-      URL.revokeObjectURL(audioUrlRef.current);
-      audioUrlRef.current = null;
-    }
-  }, []);
+    return () => {
+      window.removeEventListener("pointerdown", handleUserActivation, { capture: true });
+      window.removeEventListener("keydown", handleUserActivation, { capture: true });
+    };
+  }, [unlockSpeech]);
 
-  const waitForGeneratedAudioToFinish = useCallback((): Promise<void> => {
-    if (!audioElementRef.current && audioQueueRef.current.length === 0) {
-      return Promise.resolve();
+  const cancelBrowserSpeech = useCallback(() => {
+    speechRunIdRef.current += 1;
+    clearSpeechStartTimer();
+    utteranceQueueRef.current = [];
+    utteranceRef.current = null;
+    if (isSpeechSynthesisSupported()) {
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.resume();
     }
-
-    return new Promise((resolve) => {
-      const poll = window.setInterval(() => {
-        if (
-          !soundEnabledRef.current ||
-          (!audioElementRef.current && audioQueueRef.current.length === 0)
-        ) {
-          window.clearInterval(poll);
-          resolve();
-        }
-      }, 100);
-    });
-  }, []);
+  }, [clearSpeechStartTimer]);
 
   useEffect(() => {
     const handleClearVoiceData = () => {
@@ -243,162 +222,57 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     return () => {
       window.removeEventListener("stepwise:clear-voice-data", handleClearVoiceData);
       recognitionRef.current?.abort();
-      stopGeneratedAudio();
-      audioQueueRef.current.forEach((audio) => URL.revokeObjectURL(audio.audioUrl));
-      audioQueueRef.current = [];
       pendingSpeechTextRef.current = [];
       processingSpeechQueueRef.current = false;
       queuedSpeechText.clear();
-      ttsQuotaBlockedRef.current = false;
-      clearCachedAudio();
+      cancelBrowserSpeech();
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current as ReturnType<typeof setTimeout>);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current as ReturnType<typeof setTimeout>);
-      if (speechStartTimerRef.current) clearTimeout(speechStartTimerRef.current);
-      if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
     };
-  }, [clearCachedAudio, clearSilenceTimer, stopGeneratedAudio]);
+  }, [cancelBrowserSpeech, clearSilenceTimer]);
 
-  const fetchSpeechAudio = useCallback(async (spokenText: string): Promise<SpeechAudio> => {
-    const response = await fetch("/api/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: spokenText }),
-    });
-
-    if (!response.ok) {
-      const data = (await response.json().catch(() => null)) as { error?: string } | null;
-      const error = new Error(data?.error ?? `TTS request failed: ${response.status}`);
-      error.name = response.status === 429 ? "TTSQuotaError" : "TTSError";
-      throw error;
-    }
-
-    const data = (await response.json()) as {
-      audioData?: string;
-      mimeType?: string;
-      model?: string;
-    };
-
-    if (!data.audioData) {
-      throw new Error("TTS route returned no audio data.");
-    }
-
-    const mimeType = data.mimeType ?? "audio/wav";
-    return {
-      audioUrl: base64ToBlobUrl(data.audioData, mimeType),
-      mimeType,
-      model: data.model,
-      text: spokenText,
-    };
-  }, []);
-
-  const playSpeechAudio = useCallback((speechAudio: SpeechAudio) => {
-    stopGeneratedAudio();
-
-    const audio = new Audio(speechAudio.audioUrl);
-    audioElementRef.current = audio;
-    audioUrlRef.current = speechAudio.audioUrl;
-    audio.playbackRate = Math.max(0.5, Math.min(2.0, loadSettings().talkingSpeed ?? 1));
-    audio.onplaying = () => {
-      setState((prev) => ({
-        ...prev,
-        mode: "speaking",
-        error: null,
-        ttsStatus: `Playing Gemini speech audio${speechAudio.model ? ` (${speechAudio.model})` : ""}.`,
-      }));
-    };
-    audio.onended = () => {
-      stopGeneratedAudio();
-      const nextAudio = audioQueueRef.current.shift();
-      if (nextAudio) {
-        playSpeechAudio(nextAudio);
-        return;
-      }
-
-      setState((prev) => ({
-        ...prev,
-        mode: "idle",
-        ttsStatus: ttsQuotaBlockedRef.current
-          ? "Gemini TTS quota reached; text response will continue without audio."
-          : "Finished Gemini speech audio.",
-      }));
-    };
-    audio.onerror = () => {
-      stopGeneratedAudio();
-      audioQueueRef.current.forEach((queuedAudio) => URL.revokeObjectURL(queuedAudio.audioUrl));
-      audioQueueRef.current = [];
-      queuedSpeechTextRef.current.clear();
-      setState((prev) => ({
-        ...prev,
-        mode: "error",
-        error: "Generated speech audio could not be played.",
-        ttsStatus: "Generated speech audio could not be played.",
-      }));
-    };
-
-    void audio.play().catch((err: unknown) => {
-      stopGeneratedAudio();
-      setState((prev) => ({
-        ...prev,
-        mode: "error",
-        error: err instanceof Error ? err.message : "Generated speech audio could not be played.",
-        ttsStatus:
-          err instanceof Error ? `Generated speech audio could not be played: ${err.message}` : "Generated speech audio could not be played.",
-      }));
-    });
-  }, [stopGeneratedAudio]);
-
-  const speakWithBrowserFallback = useCallback(
-    async (spokenText: string, initialStatus: string): Promise<void> => {
+  const speakBrowserText = useCallback(
+    (spokenText: string, statusPrefix = "Browser speech"): Promise<void> => {
       if (!isSpeechSynthesisSupported() || !soundEnabledRef.current) {
         setState((prev) => ({
           ...prev,
-          mode: "error",
-          error: "Speech synthesis is not supported in this browser.",
-          ttsStatus: "Browser fallback TTS is not supported here.",
+          mode: isSpeechSynthesisSupported() ? prev.mode : "error",
+          error: isSpeechSynthesisSupported()
+            ? prev.error
+            : "Speech synthesis is not supported in this browser.",
+          ttsStatus: isSpeechSynthesisSupported()
+            ? "Speech canceled."
+            : "Browser speech is not supported here.",
         }));
         return Promise.resolve();
-      }
-
-      if (audioElementRef.current || audioQueueRef.current.length > 0) {
-        setState((prev) => ({
-          ...prev,
-          ttsStatus: `${initialStatus} Browser fallback will continue after queued Gemini audio.`,
-        }));
-        await waitForGeneratedAudioToFinish();
-      }
-
-      if (!soundEnabledRef.current) return;
-
-      stopGeneratedAudio();
-      audioQueueRef.current.forEach((audio) => URL.revokeObjectURL(audio.audioUrl));
-      audioQueueRef.current = [];
-
-      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
-        window.speechSynthesis.cancel();
       }
 
       const chunks = splitSpeechIntoChunks(spokenText);
       if (chunks.length === 0) return Promise.resolve();
 
-      const settings = loadSettings();
+      cancelBrowserSpeech();
+      unlockSpeech();
+
       const voices = window.speechSynthesis.getVoices();
-      const preferredVoice =
-        voices.find((voice) => voice.lang.toLowerCase().startsWith("en")) ?? null;
+      const runId = speechRunIdRef.current + 1;
+      speechRunIdRef.current = runId;
 
       return new Promise((resolve) => {
         let settled = false;
         let currentChunkStarted = false;
         let startAttempt = 0;
+        let suppressNextCancelEvent = false;
 
         const finish = (mode: VoiceMode, ttsStatus: string, error: string | null = null) => {
+          if (speechRunIdRef.current !== runId) {
+            resolve();
+            return;
+          }
           if (settled) return;
           settled = true;
           utteranceQueueRef.current = [];
           utteranceRef.current = null;
-          if (speechStartTimerRef.current) {
-            clearTimeout(speechStartTimerRef.current);
-            speechStartTimerRef.current = null;
-          }
+          clearSpeechStartTimer();
           setState((prev) => ({
             ...prev,
             mode,
@@ -410,15 +284,65 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
 
         const createUtterance = (chunk: string) => {
           const utterance = new SpeechSynthesisUtterance(chunk);
-          utterance.lang = preferredVoice?.lang ?? "en-US";
-          utterance.voice = preferredVoice;
-          utterance.rate = Math.max(0.5, Math.min(2.0, settings.talkingSpeed ?? 1));
+          utterance.lang = "en-US";
+          utterance.rate = Math.max(0.5, Math.min(2.0, voiceSpeedRef.current));
           utterance.pitch = 1.0;
           utterance.volume = 1.0;
           return utterance;
         };
 
+        const retryIfSpeechDoesNotStart = () => {
+          if (speechRunIdRef.current !== runId) {
+            resolve();
+            return;
+          }
+          if (settled || currentChunkStarted || !utteranceRef.current) return;
+
+          if (startAttempt >= SPEECH_START_RETRIES) {
+            finish(
+              "error",
+              "Browser speech could not start. Click the volume button once, then try again.",
+              "Browser speech could not start."
+            );
+            return;
+          }
+
+          startAttempt += 1;
+          const retryText = utteranceRef.current.text;
+          setState((prev) => ({
+            ...prev,
+            ttsStatus: `Browser speech did not start; retrying (${startAttempt}/${SPEECH_START_RETRIES}).`,
+          }));
+
+          suppressNextCancelEvent = true;
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.resume();
+          const retryUtterance = createUtterance(retryText);
+          retryUtterance.onstart = utteranceRef.current.onstart;
+          retryUtterance.onend = utteranceRef.current.onend;
+          retryUtterance.onerror = utteranceRef.current.onerror;
+          utteranceRef.current = retryUtterance;
+
+          window.setTimeout(() => {
+            if (speechRunIdRef.current !== runId) return;
+            if (settled || currentChunkStarted || utteranceRef.current !== retryUtterance) {
+              return;
+            }
+            window.speechSynthesis.speak(retryUtterance);
+            window.speechSynthesis.resume();
+            clearSpeechStartTimer();
+            speechStartTimerRef.current = window.setTimeout(
+              retryIfSpeechDoesNotStart,
+              SPEECH_START_TIMEOUT_MS
+            );
+          }, 250);
+        };
+
         const speakQueuedChunk = () => {
+          if (speechRunIdRef.current !== runId) {
+            resolve();
+            return;
+          }
           if (!soundEnabledRef.current) {
             finish("idle", "Speech canceled.");
             return;
@@ -426,53 +350,53 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
 
           const utterance = utteranceQueueRef.current.shift();
           if (!utterance) {
-            finish("idle", "Finished browser fallback speech.");
+            finish("idle", "Finished reading aloud.");
             return;
           }
 
           currentChunkStarted = false;
           startAttempt = 0;
           utteranceRef.current = utterance;
-          window.setTimeout(() => {
-            if (settled || utteranceRef.current !== utterance) return;
-            window.speechSynthesis.speak(utterance);
-            window.speechSynthesis.resume();
-            if (speechStartTimerRef.current) {
-              clearTimeout(speechStartTimerRef.current);
-            }
-            speechStartTimerRef.current = window.setTimeout(
-              retryIfSpeechDoesNotStart,
-              1200
-            );
-          }, 0);
+          if (speechRunIdRef.current !== runId) return;
+          if (settled || utteranceRef.current !== utterance) return;
+          window.speechSynthesis.speak(utterance);
+          window.speechSynthesis.resume();
+          clearSpeechStartTimer();
+          speechStartTimerRef.current = window.setTimeout(
+            retryIfSpeechDoesNotStart,
+            SPEECH_START_TIMEOUT_MS
+          );
         };
 
         const utterances = chunks.map((chunk) => {
           const utterance = createUtterance(chunk);
           utterance.onstart = () => {
+            if (speechRunIdRef.current !== runId) return;
             currentChunkStarted = true;
-            if (speechStartTimerRef.current) {
-              clearTimeout(speechStartTimerRef.current);
-              speechStartTimerRef.current = null;
-            }
+            clearSpeechStartTimer();
             setState((prev) => ({
               ...prev,
               mode: "speaking",
               error: null,
-              ttsStatus: `Using browser fallback voice (${utterance.voice?.name ?? "default voice"}).`,
+              ttsStatus: "Speaking with browser voice.",
             }));
           };
           utterance.onend = speakQueuedChunk;
           utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
+            if (speechRunIdRef.current !== runId) return;
             if (event.error === "interrupted" || event.error === "canceled") {
+              if (suppressNextCancelEvent) {
+                suppressNextCancelEvent = false;
+                return;
+              }
               finish("idle", `Speech ${event.error}.`);
               return;
             }
 
             finish(
               "error",
-              `Browser fallback speech error: ${event.error}`,
-              `Browser fallback speech error: ${event.error}`
+              `Browser speech error: ${event.error}`,
+              `Browser speech error: ${event.error}`
             );
           };
           return utterance;
@@ -484,59 +408,17 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
           mode: "speaking",
           error: null,
           soundEnabled: true,
-          ttsStatus: `${initialStatus} Browser fallback queued: ${chunks.length} chunk${
+          ttsStatus: `${statusPrefix} queued: ${chunks.length} chunk${
             chunks.length === 1 ? "" : "s"
-          }, ${voices.length} voice${voices.length === 1 ? "" : "s"} available.`,
+          }, ${voices.length} voice${voices.length === 1 ? "" : "s"} available${
+            speechUnlockedRef.current ? "." : ". Click once anywhere if speech does not start."
+          }`,
         }));
 
         speakQueuedChunk();
-        const retryIfSpeechDoesNotStart = () => {
-          if (settled || currentChunkStarted || !utteranceRef.current) {
-            return;
-          }
-
-          if (startAttempt >= 2) {
-            finish(
-              "error",
-              "Browser fallback speech could not start. Click mute/unmute once, then try again.",
-              "Browser fallback speech could not start."
-            );
-            return;
-          }
-
-          startAttempt += 1;
-          const retryText = utteranceRef.current.text;
-          setState((prev) => ({
-            ...prev,
-            ttsStatus: `Browser fallback did not start; retrying (${startAttempt}/2).`,
-          }));
-
-          window.speechSynthesis.cancel();
-          const retryUtterance = createUtterance(retryText);
-          retryUtterance.onstart = utteranceRef.current.onstart;
-          retryUtterance.onend = utteranceRef.current.onend;
-          retryUtterance.onerror = utteranceRef.current.onerror;
-          utteranceRef.current = retryUtterance;
-
-          window.setTimeout(() => {
-            if (settled || currentChunkStarted || utteranceRef.current !== retryUtterance) {
-              return;
-            }
-            window.speechSynthesis.resume();
-            window.speechSynthesis.speak(retryUtterance);
-            if (speechStartTimerRef.current) {
-              clearTimeout(speechStartTimerRef.current);
-            }
-            speechStartTimerRef.current = window.setTimeout(
-              retryIfSpeechDoesNotStart,
-              1200
-            );
-          }, 250);
-        };
-
       });
     },
-    [stopGeneratedAudio, waitForGeneratedAudioToFinish]
+    [cancelBrowserSpeech, clearSpeechStartTimer, unlockSpeech]
   );
 
   const processSpeechQueue = useCallback(async () => {
@@ -544,81 +426,16 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     processingSpeechQueueRef.current = true;
 
     try {
-      while (
-        pendingSpeechTextRef.current.length > 0 &&
-        soundEnabledRef.current
-      ) {
+      while (pendingSpeechTextRef.current.length > 0 && soundEnabledRef.current) {
         const spokenText = pendingSpeechTextRef.current.shift();
         if (!spokenText) continue;
-
-        if (ttsQuotaBlockedRef.current) {
-          queuedSpeechTextRef.current.delete(spokenText);
-          await speakWithBrowserFallback(
-            spokenText,
-            "Gemini TTS quota reached;"
-          );
-          continue;
-        }
-
-        setState((prev) => ({
-          ...prev,
-          ttsStatus: "Preparing live response audio...",
-        }));
-
-        try {
-          const speechAudio = await fetchSpeechAudio(spokenText);
-          queuedSpeechTextRef.current.delete(spokenText);
-
-          if (!soundEnabledRef.current) {
-            URL.revokeObjectURL(speechAudio.audioUrl);
-            continue;
-          }
-
-          setState((prev) => ({
-            ...prev,
-            mode: "speaking",
-            error: null,
-            soundEnabled: true,
-            ttsStatus: "Live response audio ready.",
-          }));
-
-          if (audioElementRef.current) {
-            audioQueueRef.current.push(speechAudio);
-          } else {
-            playSpeechAudio(speechAudio);
-          }
-        } catch (err) {
-          queuedSpeechTextRef.current.delete(spokenText);
-          if (
-            err instanceof Error &&
-            (err.name === "TTSQuotaError" || /quota|429|rate limit/i.test(err.message))
-          ) {
-            ttsQuotaBlockedRef.current = true;
-            setState((prev) => ({
-              ...prev,
-              ttsStatus:
-                "Gemini TTS quota reached; switching to browser fallback voice.",
-            }));
-            await speakWithBrowserFallback(
-              spokenText,
-              "Gemini TTS quota reached;"
-            );
-            continue;
-          }
-
-          setState((prev) => ({
-            ...prev,
-            ttsStatus:
-              err instanceof Error
-                ? `Gemini live TTS failed: ${err.message}`
-                : "Gemini live TTS failed.",
-          }));
-        }
+        queuedSpeechTextRef.current.delete(spokenText);
+        await speakBrowserText(spokenText, "Browser speech");
       }
     } finally {
       processingSpeechQueueRef.current = false;
     }
-  }, [fetchSpeechAudio, playSpeechAudio, speakWithBrowserFallback]);
+  }, [speakBrowserText]);
 
   const enqueueSpeech = useCallback(
     (text: string) => {
@@ -633,48 +450,11 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     [processSpeechQueue]
   );
 
-  const preloadSpeech = useCallback(
-    async (text: string) => {
-      const spokenText = normalizeSpeechText(text);
-      if (!spokenText) return;
-      if (cachedAudioRef.current?.text === spokenText) return;
-      if (preloadRequestRef.current === spokenText) return;
-
-      preloadRequestRef.current = spokenText;
-      setState((prev) => ({
-        ...prev,
-        ttsStatus: "Preparing Gemini speech audio...",
-      }));
-
-      try {
-        const speechAudio = await fetchSpeechAudio(spokenText);
-        if (preloadRequestRef.current !== spokenText) {
-          URL.revokeObjectURL(speechAudio.audioUrl);
-          return;
-        }
-
-        clearCachedAudio();
-        cachedAudioRef.current = speechAudio;
-        setState((prev) => ({
-          ...prev,
-          ttsStatus: `Gemini speech audio ready${speechAudio.model ? ` (${speechAudio.model})` : ""}.`,
-        }));
-      } catch (err) {
-        setState((prev) => ({
-          ...prev,
-          ttsStatus:
-            err instanceof Error
-              ? `Gemini TTS preload failed: ${err.message}`
-              : "Gemini TTS preload failed.",
-        }));
-      } finally {
-        if (preloadRequestRef.current === spokenText) {
-          preloadRequestRef.current = null;
-        }
-      }
-    },
-    [clearCachedAudio, fetchSpeechAudio]
-  );
+  const preloadSpeech = useCallback(() => {
+    if (!isSpeechSynthesisSupported()) return;
+    unlockSpeech();
+    window.speechSynthesis.getVoices();
+  }, [unlockSpeech]);
 
   const finalizeTurn = useCallback(() => {
     const transcript = finalTranscriptRef.current.trim();
@@ -714,6 +494,8 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
   }, [clearSilenceTimer, onTranscriptReady]);
 
   const startListening = useCallback(() => {
+    unlockSpeech();
+
     const SpeechRecognitionClass = getSpeechRecognitionClass();
     if (!SpeechRecognitionClass) {
       setState((prev) => ({
@@ -730,8 +512,7 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
       recognitionRef.current = null;
     }
 
-    if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
-
+    cancelBrowserSpeech();
     clearSilenceTimer();
     finalTranscriptRef.current = "";
     finalizingRef.current = false;
@@ -769,10 +550,7 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
         }
 
         if (hasSpeech) {
-          if (isSpeechSynthesisSupported() && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
-            window.speechSynthesis.cancel();
-            utteranceRef.current = null;
-          }
+          cancelBrowserSpeech();
 
           const liveTranscript = `${finalTranscriptRef.current}${interimTranscript}`.trim();
           setState((prev) => ({
@@ -833,7 +611,7 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
             : "Failed to start speech recognition.",
       }));
     }
-  }, [clearSilenceTimer, finalizeTurn]);
+  }, [cancelBrowserSpeech, clearSilenceTimer, finalizeTurn, unlockSpeech]);
 
   const stopListening = useCallback(() => {
     clearSilenceTimer();
@@ -842,256 +620,77 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
     }
   }, [clearSilenceTimer]);
 
-  const speak = useCallback(async (text: string) => {
-    if (!isSpeechSynthesisSupported()) {
-      setState((prev) => ({
-        ...prev,
-        mode: "error",
-        error: "Speech synthesis is not supported in this browser.",
-        ttsStatus: "Browser TTS is not supported here.",
-      }));
-      return;
-    }
+  const speak = useCallback(
+    (text: string) => {
+      unlockSpeech();
 
-    if (recognitionRef.current) {
-      recognitionRef.current.onend = null;
-      recognitionRef.current.abort();
-      recognitionRef.current = null;
-    }
-    clearSilenceTimer();
-    if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
-      window.speechSynthesis.cancel();
-    }
-
-    const spokenText = normalizeSpeechText(text);
-    if (!spokenText) {
-      setState((prev) => ({
-        ...prev,
-        ttsStatus: "Read request received, but there was no readable text.",
-      }));
-      return;
-    }
-
-    try {
-      stopGeneratedAudio();
-      audioQueueRef.current.forEach((audio) => URL.revokeObjectURL(audio.audioUrl));
-      audioQueueRef.current = [];
+      if (recognitionRef.current) {
+        recognitionRef.current.onend = null;
+        recognitionRef.current.abort();
+        recognitionRef.current = null;
+      }
+      clearSilenceTimer();
       pendingSpeechTextRef.current = [];
       queuedSpeechTextRef.current.clear();
-      ttsQuotaBlockedRef.current = false;
 
-      const entry = createTranscriptEntry("assistant", spokenText);
-      const cachedAudio =
-        cachedAudioRef.current?.text === spokenText ? cachedAudioRef.current : null;
-      if (cachedAudio) {
-        cachedAudioRef.current = null;
+      const spokenText = normalizeSpeechText(text);
+      if (!spokenText) {
+        setState((prev) => ({
+          ...prev,
+          ttsStatus: "Read request received, but there was no readable text.",
+        }));
+        return;
       }
 
+      const entry = createTranscriptEntry("assistant", spokenText);
+      soundEnabledRef.current = true;
       setState((prev) => ({
         ...prev,
         mode: "speaking",
         error: null,
         soundEnabled: true,
-        ttsStatus: cachedAudio
-          ? "Starting prepared Gemini speech audio..."
-          : "Generating Gemini speech audio...",
+        ttsStatus: "Starting browser speech...",
         transcriptHistory: [...prev.transcriptHistory, entry],
       }));
 
-      const speechAudio = cachedAudio ?? (await fetchSpeechAudio(spokenText));
-      playSpeechAudio(speechAudio);
-      return;
-    } catch (err) {
-      setState((prev) => ({
-        ...prev,
-        mode: "speaking",
-        ttsStatus: `${
-          err instanceof Error ? err.message : "Gemini TTS failed"
-        }; falling back to browser TTS.`,
-      }));
-    }
-
-    const chunks = splitSpeechIntoChunks(spokenText);
-    if (chunks.length === 0) {
-      setState((prev) => ({
-        ...prev,
-        ttsStatus: "Read request received, but no speech chunks were created.",
-      }));
-      return;
-    }
-
-    const settings = loadSettings();
-    const voices = window.speechSynthesis.getVoices();
-    const preferredVoice =
-      voices.find((voice) => voice.lang.toLowerCase().startsWith("en")) ?? null;
-
-    const createUtterance = (chunk: string) => {
-      const utterance = new SpeechSynthesisUtterance(chunk);
-      utterance.lang = preferredVoice?.lang ?? "en-US";
-      utterance.voice = preferredVoice;
-      utterance.rate = Math.max(0.5, Math.min(2.0, settings.talkingSpeed ?? 1));
-      utterance.pitch = 1.0;
-      utterance.volume = 1.0;
-      return utterance;
-    };
-
-    const speakQueuedChunk = () => {
-      const utterance = utteranceQueueRef.current.shift();
-      if (!utterance) {
-        utteranceRef.current = null;
-        if (speechStartTimerRef.current) {
-          clearTimeout(speechStartTimerRef.current);
-          speechStartTimerRef.current = null;
-        }
-        setState((prev) => ({
-          ...prev,
-          mode: "idle",
-          ttsStatus: "Finished reading aloud.",
-        }));
-        return;
-      }
-
-      utteranceRef.current = utterance;
-      window.speechSynthesis.speak(utterance);
-      window.speechSynthesis.resume();
-    };
-
-    const utterances = chunks.map((chunk) => {
-      const utterance = createUtterance(chunk);
-      utterance.onstart = () => {
-        if (speechStartTimerRef.current) {
-          clearTimeout(speechStartTimerRef.current);
-          speechStartTimerRef.current = null;
-        }
-        setState((prev) => ({
-          ...prev,
-          mode: "speaking",
-          error: null,
-          ttsStatus: `Speech started with ${utterance.voice?.name ?? "default voice"}.`,
-        }));
-      };
-
-      utterance.onend = () => {
-        speakQueuedChunk();
-      };
-
-      utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
-        if (speechStartTimerRef.current) {
-          clearTimeout(speechStartTimerRef.current);
-          speechStartTimerRef.current = null;
-        }
-
-        if (event.error === "interrupted" || event.error === "canceled") {
-          utteranceQueueRef.current = [];
-          utteranceRef.current = null;
-          setState((prev) => ({
-            ...prev,
-            mode: "idle",
-            ttsStatus: `Speech ${event.error}.`,
-          }));
-          return;
-        }
-
-        utteranceQueueRef.current = [];
-        utteranceRef.current = null;
-        setState((prev) => ({
-          ...prev,
-          mode: "error",
-          error: `Speech synthesis error: ${event.error}`,
-          ttsStatus: `Speech synthesis error: ${event.error}`,
-        }));
-      };
-
-      return utterance;
-    });
-
-    if (utterances.length === 0) return;
-
-    utteranceQueueRef.current = utterances;
-
-    const retryFirstChunk = () => {
-      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
-        return;
-      }
-
-      setState((prev) => ({
-        ...prev,
-        ttsStatus: "Speech did not start; retrying browser TTS once.",
-      }));
-
-      utteranceQueueRef.current = chunks.map((chunk) => {
-        const utterance = createUtterance(chunk);
-        utterance.onstart = utterances[0].onstart;
-        utterance.onend = () => speakQueuedChunk();
-        utterance.onerror = utterances[0].onerror;
-        return utterance;
-      });
-
-      speakQueuedChunk();
-    };
-
-    const entry = createTranscriptEntry("assistant", spokenText);
-    soundEnabledRef.current = true;
-    setState((prev) => ({
-      ...prev,
-      mode: "speaking",
-      error: null,
-      soundEnabled: true,
-      ttsStatus: `Read request queued: ${chunks.length} chunk${chunks.length === 1 ? "" : "s"}, ${voices.length} voice${voices.length === 1 ? "" : "s"} available.`,
-      transcriptHistory: [...prev.transcriptHistory, entry],
-    }));
-
-    speakQueuedChunk();
-    speechStartTimerRef.current = window.setTimeout(retryFirstChunk, 600);
-  }, [clearSilenceTimer, fetchSpeechAudio, playSpeechAudio, stopGeneratedAudio]);
+      void speakBrowserText(spokenText, "Read request");
+    },
+    [clearSilenceTimer, speakBrowserText, unlockSpeech]
+  );
 
   const cancelSpeech = useCallback(() => {
-    stopGeneratedAudio();
-    audioQueueRef.current.forEach((audio) => URL.revokeObjectURL(audio.audioUrl));
-    audioQueueRef.current = [];
     pendingSpeechTextRef.current = [];
     queuedSpeechTextRef.current.clear();
-    ttsQuotaBlockedRef.current = false;
-    if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
-    utteranceQueueRef.current = [];
-    if (speechStartTimerRef.current) {
-      clearTimeout(speechStartTimerRef.current);
-      speechStartTimerRef.current = null;
-    }
-    utteranceRef.current = null;
-    setState((prev) => ({ ...prev, mode: "idle" }));
-  }, [stopGeneratedAudio]);
+    processingSpeechQueueRef.current = false;
+    cancelBrowserSpeech();
+    setState((prev) => ({ ...prev, mode: "idle", ttsStatus: "Speech canceled." }));
+  }, [cancelBrowserSpeech]);
 
   const toggleSound = useCallback(() => {
+    unlockSpeech();
+
     setState((prev) => {
       const nextSoundEnabled = !prev.soundEnabled;
       soundEnabledRef.current = nextSoundEnabled;
       saveSettings({ ttsEnabled: nextSoundEnabled });
 
       if (!nextSoundEnabled) {
-        stopGeneratedAudio();
-        audioQueueRef.current.forEach((audio) => URL.revokeObjectURL(audio.audioUrl));
-        audioQueueRef.current = [];
         pendingSpeechTextRef.current = [];
         queuedSpeechTextRef.current.clear();
-        ttsQuotaBlockedRef.current = false;
-        if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
-        if (speechStartTimerRef.current) {
-          clearTimeout(speechStartTimerRef.current);
-          speechStartTimerRef.current = null;
-        }
-        utteranceRef.current = null;
+        processingSpeechQueueRef.current = false;
+        cancelBrowserSpeech();
       } else {
-        ttsQuotaBlockedRef.current = false;
+        void processSpeechQueue();
       }
 
       return {
         ...prev,
         soundEnabled: nextSoundEnabled,
         mode: nextSoundEnabled ? prev.mode : "idle",
+        ttsStatus: nextSoundEnabled ? "Browser speech unmuted." : "Browser speech muted.",
       };
     });
-  }, [stopGeneratedAudio]);
+  }, [cancelBrowserSpeech, processSpeechQueue, unlockSpeech]);
 
   const toggleNativeVoiceMode = useCallback(() => {
     setState((prev) => ({ ...prev, nativeVoiceModeEnabled: !prev.nativeVoiceModeEnabled }));
@@ -1100,11 +699,14 @@ export function useVoiceTA(onTranscriptReady?: (transcript: string) => void): Vo
   const setVoiceSpeed = useCallback((speed: number) => {
     const nextSpeed = Math.max(0.5, Math.min(2.0, speed));
     saveSettings({ talkingSpeed: nextSpeed });
-    if (audioElementRef.current) {
-      audioElementRef.current.playbackRate = nextSpeed;
+    voiceSpeedRef.current = nextSpeed;
+    if (utteranceRef.current) {
+      const currentText = utteranceRef.current.text;
+      cancelBrowserSpeech();
+      void speakBrowserText(currentText, "Restarting browser speech at new speed");
     }
     setState((prev) => ({ ...prev, voiceSpeed: nextSpeed }));
-  }, []);
+  }, [cancelBrowserSpeech, speakBrowserText]);
 
   const clearTranscriptHistory = useCallback(() => {
     finalTranscriptRef.current = "";

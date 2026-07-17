@@ -23,6 +23,7 @@ function VoiceControlsInner({ voice, textToRead }: VoiceControlsProps) {
     stopListening,
     cancelSpeech,
     toggleSound,
+    speak,
     setVoiceSpeed,
   } = voice;
 
@@ -89,7 +90,15 @@ function VoiceControlsInner({ voice, textToRead }: VoiceControlsProps) {
               onClick={() => {
                 if (state.soundEnabled) {
                   cancelSpeech();
+                  toggleSound();
+                  return;
                 }
+
+                if (textToRead?.trim()) {
+                  speak(textToRead);
+                  return;
+                }
+
                 toggleSound();
               }}
               disabled={!isSpeaking && !canReadAnswer && state.soundEnabled}
