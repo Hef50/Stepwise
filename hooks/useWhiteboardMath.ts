@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { createShapeId, type Editor, type TLShapeId } from "@tldraw/tldraw";
 import { AI_LATEX_ANIMATED_TYPE } from "@/components/whiteboard/shapes/LatexAnimatedShapeUtil";
 import { AI_TEXT_ANIMATED_TYPE } from "@/components/whiteboard/shapes/TextAnimatedShapeUtil";
+import { AI_DIAGRAM_ANIMATED_TYPE } from "@/components/whiteboard/shapes/DiagramAnimatedShapeUtil";
 import {
   parseSvgPaths,
   estimateShapeDimensions,
@@ -13,6 +14,16 @@ import {
   textToSvgPaths,
   estimateTextShapeDimensions,
 } from "@/lib/whiteboard/textToSvgPaths";
+import {
+  diagramToSvgPaths,
+  estimateDiagramShapeDimensions,
+} from "@/lib/whiteboard/diagramToSvgPaths";
+import { resolveDiagramPrimitives } from "@/lib/whiteboard/diagramLayout";
+import {
+  diagramSpecKey,
+  parseDiagramSpec,
+  type DiagramSpec,
+} from "@/lib/whiteboard/diagramSpec";
 import {
   loadLatexFontSize,
   saveLatexFontSize,
@@ -27,9 +38,16 @@ import {
   type WhiteboardTextMode,
 } from "@/lib/whiteboard/textStyle";
 import {
-  getSharedTextSpeed,
-  computeLatexStepMs,
+  loadWbDiagramStyle,
+  saveWbDiagramStyle,
+  loadWbDiagramColor,
+  saveWbDiagramColor,
+  type DiagramStyle,
+} from "@/lib/whiteboard/diagramStyle";
+import {
+  computeDrawStepMs,
 } from "@/lib/chat/textReveal";
+import { getDrawSpeed } from "@/lib/chat/drawSpeeds";
 import {
   waitForLatexAnimation,
   notifyLatexAnimationComplete,
@@ -58,6 +76,13 @@ export interface UseWhiteboardMathReturn {
     text: string,
     options?: RenderTextOptions
   ) => Promise<string | null>;
+  /**
+   * Compile a DiagramSpec to stroke paths and place an animated diagram shape.
+   * Accepts a parsed DiagramSpec or a JSON string. Returns shape id or null.
+   */
+  renderDiagram: (
+    specOrJson: DiagramSpec | string
+  ) => Promise<string | null>;
   /** Pan + zoom the tldraw camera to focus on the shape with the given id. */
   focusLatexShape: (shapeId: string) => void;
   /** Current on-canvas LaTeX font size (px ≈ 1em). */
@@ -73,6 +98,12 @@ export interface UseWhiteboardMathReturn {
   /** stroke = single-line pen; outline = filled handwriting font. */
   wbTextMode: WhiteboardTextMode;
   setWbTextMode: (mode: WhiteboardTextMode) => void;
+  /** sketchy = rough.js; clean = precise geometry — baked into new diagrams. */
+  wbDiagramStyle: DiagramStyle;
+  setWbDiagramStyle: (style: DiagramStyle) => void;
+  /** Default stroke color for new diagrams. */
+  wbDiagramColor: string;
+  setWbDiagramColor: (color: string) => void;
   /** Delete all shapes and wipe the persisted whiteboard document. */
   clearWhiteboard: () => Promise<void>;
 }
@@ -110,6 +141,20 @@ function findExistingTextShape(
   return null;
 }
 
+function findExistingDiagramShape(
+  editor: Editor,
+  key: string
+): TLShapeId | null {
+  for (const shape of editor.getCurrentPageShapes()) {
+    if (shape.type !== AI_DIAGRAM_ANIMATED_TYPE) continue;
+    const props = shape.props as { specKey?: string };
+    if (typeof props.specKey === "string" && props.specKey === key) {
+      return shape.id;
+    }
+  }
+  return null;
+}
+
 export function useWhiteboardMath(
   editorRef: React.RefObject<Editor | null>
 ): UseWhiteboardMathReturn {
@@ -117,6 +162,8 @@ export function useWhiteboardMath(
   const [wbTextSize, setWbTextSizeState] = useState(loadWbTextSize);
   const [wbTextColor, setWbTextColorState] = useState(loadWbTextColor);
   const [wbTextMode, setWbTextModeState] = useState(loadWbTextMode);
+  const [wbDiagramStyle, setWbDiagramStyleState] = useState(loadWbDiagramStyle);
+  const [wbDiagramColor, setWbDiagramColorState] = useState(loadWbDiagramColor);
 
   const setLatexFontSize = useCallback(
     (size: number) => {
@@ -185,6 +232,16 @@ export function useWhiteboardMath(
     setWbTextModeState(mode);
   }, []);
 
+  const setWbDiagramStyle = useCallback((style: DiagramStyle) => {
+    saveWbDiagramStyle(style);
+    setWbDiagramStyleState(style);
+  }, []);
+
+  const setWbDiagramColor = useCallback((color: string) => {
+    saveWbDiagramColor(color);
+    setWbDiagramColorState(color);
+  }, []);
+
   const renderLatex = useCallback(
     async (latex: string, displayMode = true): Promise<string | null> => {
       const editor = editorRef.current;
@@ -237,10 +294,10 @@ export function useWhiteboardMath(
       const cappedPaths = paths.slice(0, MAX_ANIMATED_PATHS);
       const { w, h } = estimateShapeDimensions(viewBox, latexFontSize);
       const stepMs =
-        computeLatexStepMs(
-          getSharedTextSpeed(),
-          latex,
-          cappedPaths.length
+        computeDrawStepMs(
+          getDrawSpeed("latex"),
+          cappedPaths.length,
+          { contentLength: latex.trim().length, kind: "latex" }
         ) ?? 0;
 
       const existingBounds = editor.getCurrentPageBounds();
@@ -335,10 +392,10 @@ export function useWhiteboardMath(
 
       const { w, h } = estimateTextShapeDimensions(viewBox);
       const stepMs =
-        computeLatexStepMs(
-          getSharedTextSpeed(),
-          trimmed,
-          Math.max(paths.length, 1)
+        computeDrawStepMs(
+          getDrawSpeed("text"),
+          Math.max(paths.length, 1),
+          { contentLength: trimmed.length, kind: "text" }
         ) ?? 0;
 
       const existingBounds = editor.getCurrentPageBounds();
@@ -403,6 +460,146 @@ export function useWhiteboardMath(
     [editorRef, wbTextSize, wbTextColor, wbTextMode]
   );
 
+  const renderDiagram = useCallback(
+    async (specOrJson: DiagramSpec | string): Promise<string | null> => {
+      const editor = editorRef.current;
+      if (!editor) return null;
+
+      let spec: DiagramSpec | null;
+      if (typeof specOrJson === "string") {
+        try {
+          const parsed: unknown = JSON.parse(specOrJson);
+          spec = parseDiagramSpec(parsed);
+        } catch {
+          console.error("[useWhiteboardMath] diagram JSON parse failed");
+          return null;
+        }
+      } else {
+        spec = parseDiagramSpec(specOrJson);
+      }
+      if (!spec) {
+        console.error("[useWhiteboardMath] invalid diagram spec");
+        return null;
+      }
+
+      const key = diagramSpecKey(spec);
+      const existingId = findExistingDiagramShape(editor, key);
+      if (existingId) {
+        notifyLatexAnimationComplete(existingId);
+        return existingId;
+      }
+
+      let paths: Awaited<ReturnType<typeof diagramToSvgPaths>>["paths"];
+      let viewBox: string;
+      try {
+        const primitives = resolveDiagramPrimitives(spec);
+        const compiled = await diagramToSvgPaths(primitives, {
+          style: wbDiagramStyle,
+          color: wbDiagramColor,
+          textMode: wbTextMode,
+        });
+        paths = compiled.paths;
+        viewBox = compiled.viewBox;
+      } catch (err) {
+        console.error("[useWhiteboardMath] diagramToSvgPaths failed:", err);
+        return null;
+      }
+
+      if (paths.length === 0) {
+        console.error("[useWhiteboardMath] diagram produced no paths");
+        return null;
+      }
+
+      const { w, h } = estimateDiagramShapeDimensions(viewBox);
+      const timingKey = spec.title ?? key.slice(0, 48);
+      const shapeCount = Math.max(
+        1,
+        paths.filter((p) => p.role !== "label").length
+      );
+      const labelCount = Math.max(
+        1,
+        paths.filter((p) => p.role === "label").length
+      );
+      const shapeStepMs =
+        computeDrawStepMs(getDrawSpeed("diagram"), shapeCount, {
+          contentLength: timingKey.length,
+          kind: "diagram",
+        }) ?? 0;
+      const labelStepMs =
+        computeDrawStepMs(getDrawSpeed("text"), labelCount, {
+          contentLength: timingKey.length,
+          kind: "text",
+        }) ?? 0;
+
+      const existingBounds = editor.getCurrentPageBounds();
+      const x = 60;
+      const y = existingBounds ? existingBounds.maxY + 40 : 100;
+
+      const id = createShapeId();
+      try {
+        const shouldAnimate = shapeStepMs > 0 || labelStepMs > 0;
+        const totalDrawMs = shouldAnimate
+          ? paths.reduce((sum, p) => {
+              const ms = p.role === "label" ? labelStepMs : shapeStepMs;
+              return sum + Math.max(1, ms);
+            }, 0)
+          : 0;
+        const settleBudget = shouldAnimate ? totalDrawMs + 2500 : 0;
+        const animationDone = shouldAnimate
+          ? Promise.race([
+              waitForLatexAnimation(id),
+              new Promise<void>((resolve) => {
+                window.setTimeout(() => {
+                  cancelLatexAnimationWait(id);
+                  resolve();
+                }, settleBudget);
+              }),
+            ])
+          : Promise.resolve();
+
+        editor.createShape({
+          id,
+          type: AI_DIAGRAM_ANIMATED_TYPE,
+          x,
+          y,
+          props: {
+            specKey: key,
+            title: spec.title ?? "",
+            svgPaths: paths,
+            viewBox,
+            w,
+            h,
+            animate: shouldAnimate,
+            stepMs: shapeStepMs,
+            shapeStepMs,
+            labelStepMs,
+            style: wbDiagramStyle,
+            color: wbDiagramColor,
+          },
+        });
+
+        try {
+          const bounds = editor.getShapePageBounds(id);
+          if (bounds) {
+            editor.centerOnPoint(bounds.center, {
+              animation: { duration: 280 },
+            });
+          }
+        } catch {
+          // non-fatal
+        }
+
+        await animationDone;
+        return id;
+      } catch (err) {
+        cancelLatexAnimationWait(id);
+        console.error("[useWhiteboardMath] createDiagramShape failed:", err);
+        return null;
+      }
+    },
+    [editorRef, wbDiagramStyle, wbDiagramColor, wbTextMode]
+  );
+
   const focusLatexShape = useCallback(
     (shapeId: string) => {
       const editor = editorRef.current;
@@ -448,6 +645,7 @@ export function useWhiteboardMath(
   return {
     renderLatex,
     renderText,
+    renderDiagram,
     focusLatexShape,
     latexFontSize,
     setLatexFontSize,
@@ -457,6 +655,10 @@ export function useWhiteboardMath(
     setWbTextColor,
     wbTextMode,
     setWbTextMode,
+    wbDiagramStyle,
+    setWbDiagramStyle,
+    wbDiagramColor,
+    setWbDiagramColor,
     clearWhiteboard,
   };
 }

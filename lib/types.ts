@@ -93,9 +93,63 @@ export interface TextAnimatedShapeProps {
   fontSize: number;
 }
 
-/** Unified whiteboard draw-queue item (equations + labels, emission order). */
+/** Draw style for AI-generated whiteboard diagrams */
+export type DiagramStyle = "sketchy" | "clean";
+
+/** A single SVG path in a compiled diagram (may carry stroke/fill styling). */
+export interface DiagramPathData {
+  /** The `d` attribute of the path element */
+  d: string;
+  /** Optional `transform` attribute */
+  transform?: string;
+  /** Stroke color used during animation and for unfilled settle */
+  stroke?: string;
+  /** Stroke width in viewBox units */
+  strokeWidth?: number;
+  /** Optional fill used after settle (e.g. rough hachure fills) */
+  fill?: string;
+  /**
+   * shape = geometry (boxes, arrows, …) — paced by Diagram draw speed.
+   * label = handwritten text inside the diagram — paced by Label draw speed.
+   */
+  role?: "shape" | "label";
+}
+
+/** Props for the animated diagram custom tldraw shape */
+export interface DiagramAnimatedShapeProps {
+  /** Stable fingerprint of the original DiagramSpec (dedupe / debug) */
+  specKey: string;
+  /** Optional human-readable title */
+  title: string;
+  /** Ordered SVG paths to animate stroke-by-stroke */
+  svgPaths: DiagramPathData[];
+  /** viewBox string in canvas-pixel space */
+  viewBox: string;
+  /** Shape width in canvas units */
+  w: number;
+  /** Shape height in canvas units */
+  h: number;
+  /** When true, play stroke-draw animation once then settle */
+  animate: boolean;
+  /**
+   * @deprecated Prefer shapeStepMs — kept so older persisted shapes load.
+   * Treated as shapeStepMs when shapeStepMs is missing.
+   */
+  stepMs: number;
+  /** Per-path ms for geometry strokes (boxes, arrows); 0 = instant */
+  shapeStepMs: number;
+  /** Per-path ms for diagram text strokes; 0 = instant */
+  labelStepMs: number;
+  /** sketchy = rough.js wobble; clean = precise geometry */
+  style: DiagramStyle;
+  /** Default stroke color baked at creation */
+  color: string;
+}
+
+/** Unified whiteboard draw-queue item (equations + labels + diagrams). */
 export interface WhiteboardDrawQueueItem {
-  kind: "latex" | "text";
+  kind: "latex" | "text" | "diagram";
+  /** LaTeX / text content, or JSON string of a DiagramSpec for diagrams */
   content: string;
 }
 

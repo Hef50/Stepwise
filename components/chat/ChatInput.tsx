@@ -1,7 +1,7 @@
 "use client";
 
-import { useRef, useEffect, useCallback, type FormEvent, type KeyboardEvent } from "react";
-import { Send, Camera, Square } from "lucide-react";
+import { useRef, useEffect, type FormEvent, type KeyboardEvent } from "react";
+import { Send, Camera, Square, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -23,6 +23,9 @@ interface ChatInputProps {
   files: UploadedFile[];
   onFilesChange: (files: UploadedFile[]) => void;
   onCaptureWhiteboard: () => void;
+  onOpenCourseMaterials?: () => void;
+  /** Number of enabled course materials — shown as a badge on the library button. */
+  courseMaterialsActiveCount?: number;
   lastAssistantMessage?: string;
 }
 
@@ -36,6 +39,8 @@ export function ChatInput({
   files,
   onFilesChange,
   onCaptureWhiteboard,
+  onOpenCourseMaterials,
+  courseMaterialsActiveCount = 0,
   lastAssistantMessage,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -78,7 +83,6 @@ export function ChatInput({
 
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-2 bg-background p-3">
-
       {voice.state.error && (
         <p className="text-xs text-destructive px-1">{voice.state.error}</p>
       )}
@@ -96,7 +100,6 @@ export function ChatInput({
         </div>
       )}
 
-      {/* Full-width textarea */}
       <div className="relative w-full">
         <Textarea
           ref={textareaRef}
@@ -127,7 +130,6 @@ export function ChatInput({
         )}
       </div>
 
-      {/* Toolbar row — no longer competing with textarea for width */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center">
           <FileUpload files={files} onFilesChange={onFilesChange} />
@@ -146,10 +148,37 @@ export function ChatInput({
             </TooltipTrigger>
             <TooltipContent>Analyze whiteboard with AI vision</TooltipContent>
           </Tooltip>
+          {onOpenCourseMaterials && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="relative h-11 w-11 flex-shrink-0"
+                  onClick={onOpenCourseMaterials}
+                  aria-label="Course materials"
+                >
+                  <Library className="h-5 w-5" />
+                  {courseMaterialsActiveCount > 0 && (
+                    <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-semibold text-primary-foreground">
+                      {courseMaterialsActiveCount > 9
+                        ? "9+"
+                        : courseMaterialsActiveCount}
+                    </span>
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Course materials</TooltipContent>
+            </Tooltip>
+          )}
         </div>
 
         <div className="flex flex-shrink-0 items-center gap-1">
-          <VoiceControls voice={voice} lastAssistantMessage={lastAssistantMessage} />
+          <VoiceControls
+            voice={voice}
+            lastAssistantMessage={lastAssistantMessage}
+          />
           {isLoading ? (
             <Button
               type="button"

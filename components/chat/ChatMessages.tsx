@@ -10,6 +10,7 @@ import { useTextReveal } from "@/hooks/useTextReveal";
 import { speedToCharsPerSecond } from "@/lib/chat/textReveal";
 import { stripIncompleteMathDelimiters } from "@/lib/chat/extractEquations";
 import { sanitizeBoardTextForDisplay } from "@/lib/chat/extractBoardText";
+import { sanitizeDiagramForDisplay } from "@/lib/chat/extractDiagrams";
 
 interface ChatMessagesProps {
   messages: UIMessage[];
@@ -107,12 +108,14 @@ export function ChatMessages({
     isLiveAssistant ? lastMsg.id : undefined,
     revealPaused
   );
-  // Never flash `$$` / unclosed math or `[[board:` markers in the chat UI
+  // Never flash `$$` / unclosed math, `[[board:` or `[[diagram:` markers in chat
   const lastDisplayedText = isLiveAssistant
-    ? sanitizeBoardTextForDisplay(
-        stripIncompleteMathDelimiters(lastDisplayedRaw)
+    ? sanitizeDiagramForDisplay(
+        sanitizeBoardTextForDisplay(
+          stripIncompleteMathDelimiters(lastDisplayedRaw)
+        )
       )
-    : sanitizeBoardTextForDisplay(lastDisplayedRaw);
+    : sanitizeDiagramForDisplay(sanitizeBoardTextForDisplay(lastDisplayedRaw));
 
   // Report the *raw* reveal (including complete math) so extraction can fire
   // as soon as an equation closes — even while display hides the delimiters.

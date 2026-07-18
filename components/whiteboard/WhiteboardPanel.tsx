@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useCallback } from "react";
+import { useCallback, type ReactNode } from "react";
 import type { Editor } from "@tldraw/tldraw";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -20,9 +20,14 @@ const Whiteboard = dynamic(() => import("./Whiteboard"), {
 
 interface WhiteboardPanelProps {
   onEditorReady: (editor: Editor) => void;
+  /** Overlay UI (e.g. settings under the page menu). */
+  overlay?: ReactNode;
 }
 
-export function WhiteboardPanel({ onEditorReady }: WhiteboardPanelProps) {
+export function WhiteboardPanel({
+  onEditorReady,
+  overlay,
+}: WhiteboardPanelProps) {
   const handleEditorReady = useCallback(
     (editor: Editor) => {
       onEditorReady(editor);
@@ -35,6 +40,7 @@ export function WhiteboardPanel({ onEditorReady }: WhiteboardPanelProps) {
       <ErrorBoundary label="Whiteboard Canvas">
         <Whiteboard onEditorReady={handleEditorReady} />
       </ErrorBoundary>
+      {overlay}
     </div>
   );
 }

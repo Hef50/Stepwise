@@ -73,7 +73,7 @@ export function TextSpeedSlider({ value, onChange }: TextSpeedSliderProps) {
         </TooltipTrigger>
         <TooltipContent side="bottom">
           <p className="text-xs">
-            Reading &amp; equation draw speed —{" "}
+            Reading, equation, text &amp; diagram draw speed —{" "}
             {isInstant ? "Instant" : `${value} chars/sec`}
           </p>
         </TooltipContent>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { revealCountSkipDiagramMarkers } from "@/lib/chat/extractDiagrams";
 
 /**
  * Gradually reveals `fullText` at `charsPerSecond`.
@@ -12,6 +13,9 @@ import { useEffect, useRef, useState } from "react";
  *
  * When `paused` is true (e.g. a LaTeX equation is drawing on the whiteboard),
  * the reveal freezes in place and resumes when paused flips back to false.
+ *
+ * Complete `[[diagram:…]]` markers are skipped in one step so chat does not
+ * slowly type through invisible JSON.
  */
 export function useTextReveal(
   fullText: string,
@@ -47,6 +51,20 @@ export function useTextReveal(
     }
   }, [charsPerSecond, fullText, paused]);
 
+  // When new complete diagram markers appear in the stream at/after the
+  // reveal cursor, jump past them immediately.
+  useEffect(() => {
+    if (charsPerSecond === null) return;
+    const skipped = revealCountSkipDiagramMarkers(
+      fullText,
+      Math.floor(countRef.current)
+    );
+    if (skipped > Math.floor(countRef.current)) {
+      countRef.current = skipped;
+      setRevealedCount(skipped);
+    }
+  }, [fullText, charsPerSecond]);
+
   // Progressive reveal loop. Re-runs when more text streams in, but never
   // resets countRef — so a mid-stream speed change only affects the rate
   // of characters that have not been written yet.
@@ -80,7 +98,8 @@ export function useTextReveal(
         const whole = Math.floor(frac);
         if (whole > 0) {
           frac -= whole;
-          const next = Math.min(target, current + whole);
+          let next = Math.min(target, current + whole);
+          next = revealCountSkipDiagramMarkers(fullTextRef.current, next);
           countRef.current = next + frac;
           setRevealedCount(next);
         }

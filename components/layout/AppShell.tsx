@@ -6,9 +6,17 @@ import type { Editor } from "@tldraw/tldraw";
 import { MessageSquare, PenTool, Mic } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { WhiteboardPanel } from "@/components/whiteboard/WhiteboardPanel";
+import { WhiteboardSettingsPanel } from "@/components/chat/WhiteboardSettingsPanel";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWhiteboardCapture } from "@/hooks/useWhiteboardCapture";
 import { useWhiteboardMath } from "@/hooks/useWhiteboardMath";
+import {
+  getDrawSpeed,
+  loadAllDrawSpeeds,
+  setDrawSpeed,
+  subscribeDrawSpeeds,
+  type SpeedChannel,
+} from "@/lib/chat/drawSpeeds";
 import { ModelStatusBadge } from "./ModelStatusBadge";
 import { DevModeControls } from "./DevModeControls";
 import type { AppMode, ActiveModel } from "@/lib/types";
@@ -55,6 +63,7 @@ export function AppShell() {
   const {
     renderLatex,
     renderText,
+    renderDiagram,
     focusLatexShape,
     latexFontSize,
     setLatexFontSize,
@@ -64,6 +73,10 @@ export function AppShell() {
     setWbTextColor,
     wbTextMode,
     setWbTextMode,
+    wbDiagramStyle,
+    setWbDiagramStyle,
+    wbDiagramColor,
+    setWbDiagramColor,
     clearWhiteboard,
   } = useWhiteboardMath(editorRef);
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH);
@@ -76,6 +89,43 @@ export function AppShell() {
   /** Only one Tldraw instance may mount — both share the same persistenceKey. */
   const [isLargeScreen, setIsLargeScreen] = useState(true);
   const [editorReady, setEditorReady] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [speeds, setSpeeds] = useState(loadAllDrawSpeeds);
+
+  useEffect(() => {
+    return subscribeDrawSpeeds(() => {
+      setSpeeds(loadAllDrawSpeeds());
+    });
+  }, []);
+
+  const handleSpeedChange = useCallback(
+    (channel: SpeedChannel, speed: number) => {
+      setDrawSpeed(channel, speed);
+      setSpeeds((prev) => ({ ...prev, [channel]: getDrawSpeed(channel) }));
+    },
+    []
+  );
+
+  const settingsOverlay = (
+    <WhiteboardSettingsPanel
+      open={settingsOpen}
+      onOpenChange={setSettingsOpen}
+      speeds={speeds}
+      onSpeedChange={handleSpeedChange}
+      latexFontSize={latexFontSize}
+      onLatexFontSizeChange={setLatexFontSize}
+      wbTextSize={wbTextSize}
+      onWbTextSizeChange={setWbTextSize}
+      wbTextColor={wbTextColor}
+      onWbTextColorChange={setWbTextColor}
+      wbTextMode={wbTextMode}
+      onWbTextModeChange={setWbTextMode}
+      wbDiagramStyle={wbDiagramStyle}
+      onWbDiagramStyleChange={setWbDiagramStyle}
+      wbDiagramColor={wbDiagramColor}
+      onWbDiagramColorChange={setWbDiagramColor}
+    />
+  );
 
   useEffect(() => {
     const mq = window.matchMedia("(min-width: 1024px)");
@@ -173,21 +223,15 @@ export function AppShell() {
         captureWhiteboard={capture}
         renderLatexOnCanvas={renderLatex}
         renderTextOnCanvas={renderText}
+        renderDiagramOnCanvas={renderDiagram}
         focusLatexShape={focusLatexShape}
-        latexFontSize={latexFontSize}
-        onLatexFontSizeChange={setLatexFontSize}
-        wbTextSize={wbTextSize}
-        onWbTextSizeChange={setWbTextSize}
-        wbTextColor={wbTextColor}
-        onWbTextColorChange={setWbTextColor}
-        wbTextMode={wbTextMode}
-        onWbTextModeChange={setWbTextMode}
         onClearWhiteboard={clearWhiteboard}
         editorReady={editorReady}
         onActiveModelChange={setActiveModel}
         devMode={devMode}
         forceLlm7Fail={forceLlm7Fail}
         typingHoldMs={devMode ? typingHoldMs : 0}
+        textSpeed={speeds.chat}
       />
     );
 
@@ -276,7 +320,10 @@ export function AppShell() {
           {/* Whiteboard — fills remaining space */}
           <div className="relative flex-1 overflow-hidden">
             {isLargeScreen && (
-              <WhiteboardPanel onEditorReady={handleEditorReady} />
+              <WhiteboardPanel
+                onEditorReady={handleEditorReady}
+                overlay={settingsOverlay}
+              />
             )}
           </div>
         </div>
@@ -320,7 +367,10 @@ export function AppShell() {
             className="relative flex-1 overflow-hidden mt-0"
           >
             {!isLargeScreen && (
-              <WhiteboardPanel onEditorReady={handleEditorReady} />
+              <WhiteboardPanel
+                onEditorReady={handleEditorReady}
+                overlay={settingsOverlay}
+              />
             )}
           </TabsContent>
         </Tabs>

@@ -14,18 +14,20 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { ChatMessages } from "./ChatMessages";
 import { ChatInput } from "./ChatInput";
-import { CourseMaterialsBar } from "./CourseMaterialsBar";
-import { TextSpeedSlider } from "./TextSpeedSlider";
-import { LatexFontSizeSlider } from "./LatexFontSizeSlider";
-import { WhiteboardTextControls } from "./WhiteboardTextControls";
-import { loadTextSpeed, saveTextSpeed } from "@/lib/chat/textReveal";
+import { CourseMaterialsDialog } from "./CourseMaterialsDialog";
 import { useVoiceTA } from "@/hooks/useVoiceTA";
 import { useChatPersistence } from "@/hooks/useChatPersistence";
 import { useCourseMaterials, toMessageAttachment } from "@/hooks/useCourseMaterials";
 import { detectWhiteboardIntent } from "@/lib/chat/whiteboardIntent";
 import { extractNewEquations } from "@/lib/chat/extractEquations";
 import { extractNewBoardText } from "@/lib/chat/extractBoardText";
-import type { WhiteboardTextMode } from "@/lib/whiteboard/textStyle";
+import { extractNewDiagrams } from "@/lib/chat/extractDiagrams";
+import {
+  diagramSpecKey,
+  parseDiagramSpec,
+  type DiagramSpec,
+} from "@/lib/whiteboard/diagramSpec";
+import { DEFAULT_CPS } from "@/lib/chat/textReveal";
 import type {
   UploadedFile,
   CanvasPayload,
@@ -38,24 +40,30 @@ import type {
 
 type StepwiseUIMessage = UIMessage<StepwiseMessageMetadata>;
 
+/** Parse a DiagramSpec from a JSON string or unknown value; null on failure. */
+function parseDiagramSpecSafe(raw: unknown): DiagramSpec | null {
+  if (typeof raw === "string") {
+    try {
+      return parseDiagramSpec(JSON.parse(raw));
+    } catch {
+      return null;
+    }
+  }
+  return parseDiagramSpec(raw);
+}
+
 interface ChatPanelProps {
   captureWhiteboard: () => Promise<CanvasPayload | null>;
   /** Routes a LaTeX string to the tldraw canvas as an animated shape. Returns the created shape id or null. */
   renderLatexOnCanvas?: (latex: string, displayMode?: boolean) => Promise<string | null>;
   /** Routes short handwritten text to the tldraw canvas. Returns the created shape id or null. */
   renderTextOnCanvas?: (text: string) => Promise<string | null>;
+  /** Routes a diagram spec (object or JSON string) to the tldraw canvas. */
+  renderDiagramOnCanvas?: (
+    specOrJson: DiagramSpec | string
+  ) => Promise<string | null>;
   /** Pan + zoom the canvas to focus on the given tldraw shape id. */
   focusLatexShape?: (shapeId: string) => void;
-  /** Current on-canvas LaTeX font size (px ≈ 1em). */
-  latexFontSize?: number;
-  /** Persist + apply a new LaTeX font size across existing shapes. */
-  onLatexFontSizeChange?: (size: number) => void;
-  wbTextSize?: number;
-  onWbTextSizeChange?: (size: number) => void;
-  wbTextColor?: string;
-  onWbTextColorChange?: (color: string) => void;
-  wbTextMode?: WhiteboardTextMode;
-  onWbTextModeChange?: (mode: WhiteboardTextMode) => void;
   /** Wipe the whiteboard document (shapes + IndexedDB persistence). */
   onClearWhiteboard?: () => Promise<void> | void;
   /** True once the tldraw editor has mounted and can accept shapes. */
@@ -70,6 +78,8 @@ interface ChatPanelProps {
    * after a request starts (even if tokens arrive sooner).
    */
   typingHoldMs?: number;
+  /** Chat reveal speed (cps) — controlled by the whiteboard settings overlay. */
+  textSpeed?: number;
 }
 
 function isRateLimitError(error: Error | null | undefined): boolean {
@@ -157,21 +167,15 @@ export function ChatPanel({
   captureWhiteboard,
   renderLatexOnCanvas,
   renderTextOnCanvas,
+  renderDiagramOnCanvas,
   focusLatexShape,
-  latexFontSize,
-  onLatexFontSizeChange,
-  wbTextSize,
-  onWbTextSizeChange,
-  wbTextColor,
-  onWbTextColorChange,
-  wbTextMode,
-  onWbTextModeChange,
   onClearWhiteboard,
   editorReady = false,
   onActiveModelChange,
   devMode = false,
   forceLlm7Fail = false,
   typingHoldMs = 0,
+  textSpeed = DEFAULT_CPS,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<UploadedFile[]>([]);
@@ -179,7 +183,7 @@ export function ChatPanel({
   const [escalated, setEscalated] = useState(false);
   /** True if the user manually downgraded from Gemma to LLM7 to escape a rate limit */
   const [manuallyDowngraded, setManuallyDowngraded] = useState(false);
-  const [textSpeed, setTextSpeed] = useState(loadTextSpeed);
+  const [materialsOpen, setMaterialsOpen] = useState(false);
   const [isCatchingUpReveal, setIsCatchingUpReveal] = useState(false);
   const voice = useVoiceTA();
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
@@ -192,11 +196,13 @@ export function ChatPanel({
   const renderedEquationsRef = useRef<Set<string>>(new Set());
   /** Set of normalized board-text labels already sent (prevents re-sending) */
   const renderedBoardTextRef = useRef<Set<string>>(new Set());
+  /** Set of diagram spec keys already sent (prevents re-sending) */
+  const renderedDiagramsRef = useRef<Set<string>>(new Set());
   /** Throttled reveal text from ChatMessages — extraction keys off this, not the raw stream. */
   const [revealedText, setRevealedText] = useState("");
   /**
    * Serial draw queue: at most one shape animates at a time, and text reveal
-   * is paused while a draw is in flight. Preserves latex/text emission order.
+   * is paused while a draw is in flight. Preserves latex/text/diagram emission order.
    */
   const drawQueueRef = useRef<WhiteboardDrawQueueItem[]>([]);
   const drawingRef = useRef(false);
@@ -209,6 +215,8 @@ export function ChatPanel({
   renderLatexRef.current = renderLatexOnCanvas;
   const renderTextRef = useRef(renderTextOnCanvas);
   renderTextRef.current = renderTextOnCanvas;
+  const renderDiagramRef = useRef(renderDiagramOnCanvas);
+  renderDiagramRef.current = renderDiagramOnCanvas;
 
   const markEquationReady = useCallback((latex: string) => {
     const key = latex.trim();
@@ -250,6 +258,35 @@ export function ChatPanel({
     drawQueueRef.current.push({ kind: "text", content: text.trim() });
   }, []);
 
+  const enqueueDiagramDraw = useCallback((spec: DiagramSpec | string) => {
+    let content: string;
+    let key: string;
+    if (typeof spec === "string") {
+      content = spec;
+      try {
+        const parsed = parseDiagramSpecSafe(spec);
+        if (!parsed) return;
+        key = diagramSpecKey(parsed);
+        content = JSON.stringify(parsed);
+      } catch {
+        return;
+      }
+    } else {
+      key = diagramSpecKey(spec);
+      content = JSON.stringify(spec);
+    }
+    if (renderedDiagramsRef.current.has(key)) return;
+    if (
+      drawQueueRef.current.some(
+        (q) => q.kind === "diagram" && q.content === content
+      )
+    ) {
+      return;
+    }
+    renderedDiagramsRef.current.add(key);
+    drawQueueRef.current.push({ kind: "diagram", content });
+  }, []);
+
   const processDrawQueue = useCallback(async () => {
     if (drawingRef.current) return;
     if (!editorReady) return;
@@ -276,7 +313,7 @@ export function ChatPanel({
           } else {
             renderedEquationsRef.current.delete(item.content.trim());
           }
-        } else {
+        } else if (item.kind === "text") {
           const render = renderTextRef.current;
           if (!render) {
             renderedBoardTextRef.current.delete(
@@ -289,6 +326,28 @@ export function ChatPanel({
             renderedBoardTextRef.current.delete(
               item.content.trim().toLowerCase()
             );
+          }
+        } else {
+          const render = renderDiagramRef.current;
+          if (!render) {
+            try {
+              const parsed = JSON.parse(item.content) as unknown;
+              const spec = parseDiagramSpecSafe(parsed);
+              if (spec) renderedDiagramsRef.current.delete(diagramSpecKey(spec));
+            } catch {
+              // ignore
+            }
+            continue;
+          }
+          const shapeId = await render(item.content);
+          if (!shapeId) {
+            try {
+              const parsed = JSON.parse(item.content) as unknown;
+              const spec = parseDiagramSpecSafe(parsed);
+              if (spec) renderedDiagramsRef.current.delete(diagramSpecKey(spec));
+            } catch {
+              // ignore
+            }
           }
         }
       }
@@ -308,6 +367,8 @@ export function ChatPanel({
   enqueueLatexDrawRef.current = enqueueLatexDraw;
   const enqueueTextDrawRef = useRef(enqueueTextDraw);
   enqueueTextDrawRef.current = enqueueTextDraw;
+  const enqueueDiagramDrawRef = useRef(enqueueDiagramDraw);
+  enqueueDiagramDrawRef.current = enqueueDiagramDraw;
   const processDrawQueueRef = useRef(processDrawQueue);
   processDrawQueueRef.current = processDrawQueue;
 
@@ -317,11 +378,6 @@ export function ChatPanel({
   useEffect(() => {
     onActiveModelChange?.(escalated ? "gemma" : "llm7");
   }, [escalated, onActiveModelChange]);
-
-  const handleTextSpeedChange = useCallback((speed: number) => {
-    setTextSpeed(speed);
-    saveTextSpeed(speed);
-  }, []);
 
   const { messages, sendMessage, setMessages, status, stop, error, clearError, regenerate, addToolOutput } =
     useChat<StepwiseUIMessage>({
@@ -359,6 +415,18 @@ export function ChatPanel({
 
           addToolOutput({
             tool: "render_text_whiteboard",
+            toolCallId: toolCall.toolCallId,
+            output: { rendered: true },
+          });
+        }
+
+        if (toolCall.toolName === "render_diagram_whiteboard") {
+          const input = toolCall.input as DiagramSpec;
+          enqueueDiagramDrawRef.current(input);
+          void processDrawQueueRef.current();
+
+          addToolOutput({
+            tool: "render_diagram_whiteboard",
             toolCallId: toolCall.toolCallId,
             output: { rendered: true },
           });
@@ -485,6 +553,43 @@ export function ChatPanel({
     editorReady,
     processDrawQueue,
   ]);
+
+  // ── ASAP diagram extraction from the raw stream (not reveal-throttled) ──
+  // Diagram JSON is large; waiting for char-reveal made drawing feel lagged.
+  // As soon as a complete [[diagram:…]] lands in the assistant message (or a
+  // tool call fires), enqueue it so compile + stroke animation start immediately.
+  useEffect(() => {
+    if (!editorReady || !renderDiagramOnCanvas) return;
+
+    const lastAssistant = [...messages]
+      .reverse()
+      .find((m) => m.role === "assistant");
+    if (!lastAssistant) return;
+
+    const fullText = lastAssistant.parts
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    if (!fullText) return;
+
+    let queued = false;
+    const newDiagrams = extractNewDiagrams(
+      fullText,
+      renderedDiagramsRef.current
+    );
+    for (const spec of newDiagrams) {
+      const content = JSON.stringify(spec);
+      if (
+        !drawQueueRef.current.some(
+          (q) => q.kind === "diagram" && q.content === content
+        )
+      ) {
+        drawQueueRef.current.push({ kind: "diagram", content });
+        queued = true;
+      }
+    }
+    if (queued) void processDrawQueue();
+  }, [messages, editorReady, renderDiagramOnCanvas, processDrawQueue]);
 
   /** Pan + zoom the tldraw canvas to the shape linked to `latex`. */
   const focusEquation = useCallback(
@@ -633,6 +738,7 @@ export function ChatPanel({
     equationShapeMapRef.current.clear();
     renderedEquationsRef.current.clear();
     renderedBoardTextRef.current.clear();
+    renderedDiagramsRef.current.clear();
     drawQueueRef.current = [];
     drawingRef.current = false;
     setRevealPaused(false);
@@ -654,39 +760,16 @@ export function ChatPanel({
 
   return (
     <TooltipProvider>
-      <div className="flex h-full flex-col overflow-hidden">
-        {/* Header */}
-        <div className="flex flex-shrink-0 flex-wrap items-start justify-between gap-2 px-4 py-3 border-b border-border">
+      <div className="relative flex h-full flex-col overflow-hidden">
+        {/* Header — slim: title + clear (settings live bottom-right of app) */}
+        <div className="flex flex-shrink-0 items-center justify-between gap-2 px-4 py-3 border-b border-border">
           <div className="min-w-0 shrink">
             <h1 className="text-sm font-semibold">Stepwise</h1>
             <p className="text-xs text-muted-foreground">
               {provider === "gemma" ? "Gemma 4 · Vision enabled" : "AI Tutor"}
             </p>
           </div>
-          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
-            <TextSpeedSlider value={textSpeed} onChange={handleTextSpeedChange} />
-            {latexFontSize !== undefined && onLatexFontSizeChange && (
-              <LatexFontSizeSlider
-                value={latexFontSize}
-                onChange={onLatexFontSizeChange}
-              />
-            )}
-            {wbTextSize !== undefined &&
-              onWbTextSizeChange &&
-              wbTextColor !== undefined &&
-              onWbTextColorChange &&
-              wbTextMode !== undefined &&
-              onWbTextModeChange && (
-                <WhiteboardTextControls
-                  size={wbTextSize}
-                  onSizeChange={onWbTextSizeChange}
-                  color={wbTextColor}
-                  onColorChange={onWbTextColorChange}
-                  mode={wbTextMode}
-                  onModeChange={onWbTextModeChange}
-                />
-              )}
-            <Tooltip>
+          <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 type="button"
@@ -701,24 +784,24 @@ export function ChatPanel({
             </TooltipTrigger>
             <TooltipContent>Clear chat history</TooltipContent>
           </Tooltip>
-          </div>
         </div>
 
         <Separator />
 
-        {/* Messages */}
-        <ChatMessages
-          messages={messages}
-          isLoading={isAwaitingChatResponse}
-          onDeleteMessage={handleDeleteMessage}
-          textSpeed={textSpeed}
-          focusEquation={focusEquation}
-          onRevealedText={setRevealedText}
-          revealPaused={revealPaused}
-          readyEquations={readyEquations}
-          onCatchingUpChange={setIsCatchingUpReveal}
-          typingHoldMs={typingHoldMs}
-        />
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          <ChatMessages
+            messages={messages}
+            isLoading={isAwaitingChatResponse}
+            onDeleteMessage={handleDeleteMessage}
+            textSpeed={textSpeed}
+            focusEquation={focusEquation}
+            onRevealedText={setRevealedText}
+            revealPaused={revealPaused}
+            readyEquations={readyEquations}
+            onCatchingUpChange={setIsCatchingUpReveal}
+            typingHoldMs={typingHoldMs}
+          />
+        </div>
 
         {/* Rate limit error banner */}
         {isRateLimited && (
@@ -837,8 +920,10 @@ export function ChatPanel({
           </div>
         )}
 
-        {/* Course materials + input */}
-        <CourseMaterialsBar
+        {/* Course materials dialog + input */}
+        <CourseMaterialsDialog
+          open={materialsOpen}
+          onOpenChange={setMaterialsOpen}
           materials={courseMaterials.materials}
           isAdding={courseMaterials.isAdding}
           addError={courseMaterials.addError}
@@ -857,6 +942,10 @@ export function ChatPanel({
           files={files}
           onFilesChange={setFiles}
           onCaptureWhiteboard={handleCaptureWhiteboard}
+          onOpenCourseMaterials={() => setMaterialsOpen(true)}
+          courseMaterialsActiveCount={
+            courseMaterials.materials.filter((m) => m.enabled).length
+          }
           lastAssistantMessage={lastAssistantText}
         />
       </div>

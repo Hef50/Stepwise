@@ -12,11 +12,19 @@ import { openrouterGemma } from "@/lib/ai/openrouter";
 import { enrichMessagesWithPdfContext } from "@/lib/chat/pdfAttachments";
 import { detectWhiteboardIntent } from "@/lib/chat/whiteboardIntent";
 import { createSmokeTestStreamResponse } from "@/lib/dev/smokeTestStream";
+import { diagramSpecSchema } from "@/lib/whiteboard/diagramSpec";
 import type { ChatProvider } from "@/lib/types";
 
 const BASE_SYSTEM_PROMPT = `You are Stepwise, an expert AI tutor. You help students learn by breaking down complex concepts into clear, step-by-step explanations.
 
-DO NOT produce diagrams of any kind. Never output Mermaid, Schemdraw, or other diagram code blocks. Explain with clear prose and equations only.
+DIAGRAM RENDERING INSTRUCTIONS:
+- When a concept map, flowchart, tree, geometric figure, or simple plot would help the student understand, call render_diagram_whiteboard with a structured diagram spec.
+- Prefer layout "graph" for concept maps / flowcharts / trees (nodes + edges; the client auto-lays them out). Prefer layout "absolute" for geometry, coordinate plots, or freeform shapes with explicit coordinates.
+- Keep diagrams focused — typically 3–12 nodes or a modest set of primitives. Do not dump huge graphs.
+- Use diagrams sparingly: one clear diagram beats several cluttered ones. Keep explanatory prose in chat.
+- NEVER emit a long single-column chain of 5+ boxes when the topic has branches, inputs/outputs, or parallel ideas. Prefer branching graphs (one node with 2+ outgoing edges) or set direction "LR".
+- Keep node labels short (1–4 words). Put detail in chat prose, not inside boxes.
+- Always include an edges array that connects the story — every important relationship should be an edge so arrows are drawn.
 
 MATH RENDERING INSTRUCTIONS:
 - NEVER write mathematical equations, formulas, or expressions as plain text or inline LaTeX (e.g. do not write "$x^2$" or "\\frac{1}{2}" in your message text).
@@ -40,7 +48,7 @@ TEACHING STYLE:
 const WHITEBOARD_FORCE_ADDENDUM = `
 
 CRITICAL WHITEBOARD INSTRUCTION:
-The user has asked you to show or draw something on the whiteboard. You MUST call render_math_whiteboard and/or render_text_whiteboard at least once before writing any prose. For every equation, formula, or mathematical expression in your response, call render_math_whiteboard with its LaTeX. Use render_text_whiteboard for short labels/titles only. Do NOT write any equation as plain text.`;
+The user has asked you to show or draw something on the whiteboard. You MUST call render_math_whiteboard, render_text_whiteboard, and/or render_diagram_whiteboard at least once before writing any prose. For every equation, formula, or mathematical expression in your response, call render_math_whiteboard with its LaTeX. Use render_text_whiteboard for short labels/titles only. Use render_diagram_whiteboard for concept maps, flowcharts, geometry, or plots. Do NOT write any equation as plain text.`;
 
 /** System prompt used when the provider does not support tools (e.g. LLM7). */
 const NO_TOOLS_SYSTEM_PROMPT = `${BASE_SYSTEM_PROMPT}
@@ -48,7 +56,8 @@ const NO_TOOLS_SYSTEM_PROMPT = `${BASE_SYSTEM_PROMPT}
 NOTE: Because this provider does not support tool calls:
 - Write every mathematical equation on its own line wrapped in $$ ... $$ (display math). Example: $$E = mc^2$$.
 - For short whiteboard labels/titles/key terms (max ~6 words, never full sentences), write [[board: Your label here]] inline. Example: [[board: Quadratic formula]]. Use sparingly.
-- The UI will render equations and board labels on the whiteboard. Do NOT produce any diagrams.`;
+- For diagrams (concept maps, flowcharts, geometry, plots), write a single-line marker [[diagram: {json}]] where {json} is a valid diagram spec object. Prefer branching graphs over long vertical chains; use short labels (1–4 words) and include every relationship in edges. Example: [[diagram: {"layout":"graph","title":"Photosynthesis","direction":"LR","nodes":[{"id":"light","label":"Light"},{"id":"water","label":"Water"},{"id":"etc","label":"ETC"},{"id":"calvin","label":"Calvin Cycle"},{"id":"sugar","label":"Glucose"}],"edges":[{"from":"light","to":"etc"},{"from":"water","to":"etc"},{"from":"etc","to":"calvin"},{"from":"calvin","to":"sugar"}]}]]. Absolute example: [[diagram: {"layout":"absolute","primitives":[{"type":"circle","cx":80,"cy":80,"r":40},{"type":"label","x":80,"y":80,"text":"Earth"}]}]].
+- The UI will render equations, board labels, and diagrams on the whiteboard. Do NOT output Mermaid or other diagram code fences.`;
 
 const mathWhiteboardTool = {
   description:
@@ -86,9 +95,21 @@ const textWhiteboardTool = {
   }),
 } as const;
 
+const diagramWhiteboardTool = {
+  description:
+    "Draw a hand-drawn diagram on the whiteboard stroke-by-stroke. " +
+    "Use for concept maps, flowcharts, trees (layout: graph — nodes + edges, auto-laid-out), " +
+    "or geometry / plots / freeform shapes (layout: absolute — primitives with coordinates). " +
+    "Prefer branching graphs over long single-column chains; keep node labels to 1–4 words; " +
+    "include every relationship in edges. Optional direction: TB or LR. " +
+    "Keep diagrams focused (typically 3–12 nodes or a modest primitive set).",
+  inputSchema: diagramSpecSchema,
+} as const;
+
 type WhiteboardTools = {
   render_math_whiteboard: typeof mathWhiteboardTool;
   render_text_whiteboard: typeof textWhiteboardTool;
+  render_diagram_whiteboard: typeof diagramWhiteboardTool;
 };
 
 interface ChatBody {
@@ -171,6 +192,7 @@ export async function POST(request: Request) {
         tools: {
           render_math_whiteboard: mathWhiteboardTool,
           render_text_whiteboard: textWhiteboardTool,
+          render_diagram_whiteboard: diagramWhiteboardTool,
         },
         ...(forceWhiteboard
           ? {

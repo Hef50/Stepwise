@@ -39,20 +39,61 @@ export function speedToLatexStepMs(cps: number): number | null {
   return Math.round(3000 / rate);
 }
 
+export type WhiteboardDrawKind = "latex" | "text" | "diagram";
+
+/**
+ * Per-path stroke duration (ms) for whiteboard hand-drawing.
+ * Scales across the full reading-speed slider for latex, text, and diagrams.
+ * Returns `null` for instant mode (cps <= 0).
+ */
+export function computeDrawStepMs(
+  cps: number,
+  pathCount: number,
+  options?: {
+    contentLength?: number;
+    kind?: WhiteboardDrawKind;
+  }
+): number | null {
+  const rate = speedToCharsPerSecond(cps);
+  if (rate === null) return null;
+
+  const paths = Math.max(pathCount, 1);
+  const kind = options?.kind ?? "latex";
+  const contentLength = Math.max(0, options?.contentLength ?? 0);
+
+  // Baseline ms/path at DEFAULT_CPS — diagrams need much slower strokes
+  // (many paths); labels and equations sit in between.
+  const basePerPath =
+    kind === "diagram" ? 320 : kind === "text" ? 190 : 220;
+
+  // Also stretch a bit when there is substantial content (equations / labels)
+  const contentFactor =
+    contentLength > 0
+      ? Math.min(1.6, Math.max(1, contentLength / (paths * 3)))
+      : 1;
+
+  // Inverse with reading rate relative to the default slider position
+  const scaled = basePerPath * contentFactor * (DEFAULT_CPS / rate);
+
+  // Diagrams: higher floor so they never become a blur at "fast" settings
+  const minStep = kind === "diagram" ? 90 : kind === "text" ? 55 : 50;
+  const maxStep = kind === "diagram" ? 1400 : 800;
+  return Math.round(Math.min(maxStep, Math.max(minStep, scaled)));
+}
+
 /**
  * Compute per-path draw ms so the whole equation tracks typing pace at `cps`.
+ * @deprecated Prefer `computeDrawStepMs` — kept for call-site compatibility.
  */
 export function computeLatexStepMs(
   cps: number,
   latex: string,
   pathCount: number
 ): number | null {
-  const rate = speedToCharsPerSecond(cps);
-  if (rate === null) return null;
-  const paths = Math.max(pathCount, 1);
-  const charEquivalent = Math.max(latex.trim().length * 2.5, paths * 2.5);
-  const totalMs = (charEquivalent / rate) * 1000;
-  return Math.max(100, Math.round(totalMs / paths));
+  return computeDrawStepMs(cps, pathCount, {
+    contentLength: latex.trim().length,
+    kind: "latex",
+  });
 }
 
 // ─── Shared live speed for the whiteboard shape renderer ─────────────────────

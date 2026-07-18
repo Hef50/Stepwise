@@ -43,7 +43,11 @@ $$
 \\frac{dy}{dx} = \\frac{dy}{du} \\cdot \\frac{du}{dx}
 $$
 
-If you see streamed chat text, animated LaTeX, and handwritten labels on the board in order, the UI smoke path is healthy.
+Finally, a small concept-map diagram:
+
+[[diagram: {"layout":"graph","title":"Smoke diagram","direction":"LR","nodes":[{"id":"a","label":"Input"},{"id":"b","label":"Process","shape":"ellipse"},{"id":"c","label":"Branch A"},{"id":"d","label":"Branch B"},{"id":"e","label":"Output"}],"edges":[{"from":"a","to":"b"},{"from":"b","to":"c"},{"from":"b","to":"d"},{"from":"c","to":"e"},{"from":"d","to":"e"}]}]]
+
+If you see streamed chat text, animated LaTeX, handwritten labels, and a hand-drawn diagram on the board in order, the UI smoke path is healthy.
 `;
 
 const CHUNK_SIZE = 14;

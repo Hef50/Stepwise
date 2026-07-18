@@ -36,7 +36,8 @@ export function MessageBubble({
   const visibleParts = message.parts.filter(
     (p) =>
       p.type !== "tool-render_math_whiteboard" &&
-      p.type !== "tool-render_text_whiteboard"
+      p.type !== "tool-render_text_whiteboard" &&
+      p.type !== "tool-render_diagram_whiteboard"
   );
 
   const textContent =
