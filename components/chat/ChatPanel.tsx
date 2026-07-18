@@ -65,6 +65,11 @@ interface ChatPanelProps {
   devMode?: boolean;
   /** When true (and Dev Mode), LLM7 requests are forced to fail. */
   forceLlm7Fail?: boolean;
+  /**
+   * Dev Mode: keep the typing indicator visible for at least this many ms
+   * after a request starts (even if tokens arrive sooner).
+   */
+  typingHoldMs?: number;
 }
 
 function isRateLimitError(error: Error | null | undefined): boolean {
@@ -166,6 +171,7 @@ export function ChatPanel({
   onActiveModelChange,
   devMode = false,
   forceLlm7Fail = false,
+  typingHoldMs = 0,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<UploadedFile[]>([]);
@@ -396,6 +402,8 @@ export function ChatPanel({
     status === "streaming" ||
     status === "submitted" ||
     courseMaterials.isAdding;
+  const isAwaitingChatResponse =
+    status === "streaming" || status === "submitted";
   const isChatError = status === "error" && !!error;
   const isRateLimited = isChatError && isRateLimitError(error);
   const showGenericChatError = isChatError && !isRateLimited;
@@ -701,7 +709,7 @@ export function ChatPanel({
         {/* Messages */}
         <ChatMessages
           messages={messages}
-          isLoading={isLoading}
+          isLoading={isAwaitingChatResponse}
           onDeleteMessage={handleDeleteMessage}
           textSpeed={textSpeed}
           focusEquation={focusEquation}
@@ -709,6 +717,7 @@ export function ChatPanel({
           revealPaused={revealPaused}
           readyEquations={readyEquations}
           onCatchingUpChange={setIsCatchingUpReveal}
+          typingHoldMs={typingHoldMs}
         />
 
         {/* Rate limit error banner */}

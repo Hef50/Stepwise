@@ -69,9 +69,10 @@ export function AppShell() {
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH);
   const [mode, setMode] = useState<AppMode>("text");
   const [activeModel, setActiveModel] = useState<ActiveModel>("llm7");
-  /** Session-only Dev Mode extras (error injection, smoke test). */
+  /** Session-only Dev Mode extras (error injection, smoke test, typing hold). */
   const [devMode, setDevMode] = useState(false);
   const [forceLlm7Fail, setForceLlm7Fail] = useState(false);
+  const [typingHoldMs, setTypingHoldMs] = useState(0);
   /** Only one Tldraw instance may mount — both share the same persistenceKey. */
   const [isLargeScreen, setIsLargeScreen] = useState(true);
   const [editorReady, setEditorReady] = useState(false);
@@ -186,6 +187,7 @@ export function AppShell() {
         onActiveModelChange={setActiveModel}
         devMode={devMode}
         forceLlm7Fail={forceLlm7Fail}
+        typingHoldMs={devMode ? typingHoldMs : 0}
       />
     );
 
@@ -227,6 +229,8 @@ export function AppShell() {
         onDevModeChange={setDevMode}
         forceLlm7Fail={forceLlm7Fail}
         onForceLlm7FailChange={setForceLlm7Fail}
+        typingHoldMs={typingHoldMs}
+        onTypingHoldMsChange={setTypingHoldMs}
       />
       <ModelStatusBadge model={activeModel} />
     </div>

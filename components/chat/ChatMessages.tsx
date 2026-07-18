@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { UIMessage } from "ai";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageBubble } from "./MessageBubble";
-import { Skeleton } from "@/components/ui/skeleton";
+import { TypingIndicator } from "./TypingIndicator";
 import { Bot } from "lucide-react";
 import { useTextReveal } from "@/hooks/useTextReveal";
 import { speedToCharsPerSecond } from "@/lib/chat/textReveal";
@@ -29,6 +29,11 @@ interface ChatMessagesProps {
   readyEquations?: ReadonlySet<string>;
   /** Reports whether the reveal is still catching up after the LLM finished. */
   onCatchingUpChange?: (catchingUp: boolean) => void;
+  /**
+   * Dev Mode: keep the typing indicator visible for at least this many ms
+   * after a request starts, even if tokens arrive sooner.
+   */
+  typingHoldMs?: number;
 }
 
 function getAssistantText(message: UIMessage): string {
@@ -50,12 +55,16 @@ export function ChatMessages({
   revealPaused = false,
   readyEquations,
   onCatchingUpChange,
+  typingHoldMs = 0,
 }: ChatMessagesProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const typingHoldTimerRef = useRef<number | null>(null);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(
     null
   );
+  /** Dev Mode: true while the artificial typing hold is still running. */
+  const [typingHoldActive, setTypingHoldActive] = useState(false);
   const charsPerSecond = speedToCharsPerSecond(textSpeed);
 
   const lastMsg = messages[messages.length - 1];
@@ -73,8 +82,27 @@ export function ChatMessages({
 
   const lastAssistantFullText =
     lastMsg?.role === "assistant" ? getAssistantText(lastMsg) : "";
+  const lastAssistantTextLen = lastAssistantFullText.length;
+
+  const awaitingFirstToken =
+    isLoading &&
+    (messages.length === 0 ||
+      lastMsg?.role === "user" ||
+      lastAssistantTextLen === 0);
+
+  // Keep dots up for the hold duration even after tokens arrive / stream ends.
+  // Drop the hold immediately on error/abort (loading ended, no assistant text).
+  const showTypingIndicator =
+    awaitingFirstToken ||
+    (typingHoldActive && isLoading) ||
+    (typingHoldActive && lastAssistantTextLen > 0);
+
+  // Hold the typing indicator for a minimum duration in Dev Mode — gate reveal
+  // so text doesn't flash behind the dots.
+  const gatedAssistantText = showTypingIndicator ? "" : lastAssistantFullText;
+
   const lastDisplayedRaw = useTextReveal(
-    lastAssistantFullText,
+    gatedAssistantText,
     isLiveAssistant ? charsPerSecond : null,
     isLiveAssistant ? lastMsg.id : undefined,
     revealPaused
@@ -88,7 +116,9 @@ export function ChatMessages({
 
   // Report the *raw* reveal (including complete math) so extraction can fire
   // as soon as an equation closes — even while display hides the delimiters.
+  // Skip while the typing indicator is up so we don't clear whiteboard state.
   useEffect(() => {
+    if (showTypingIndicator) return;
     if (onRevealedText && lastMsg?.role === "assistant") {
       onRevealedText(isLiveAssistant ? lastDisplayedRaw : lastAssistantFullText);
     }
@@ -98,21 +128,60 @@ export function ChatMessages({
     lastAssistantFullText,
     isLiveAssistant,
     lastMsg?.role,
+    showTypingIndicator,
   ]);
 
-  const lastAssistantTextLen = lastAssistantFullText.length;
+  // Start a Dev Mode typing hold whenever a generation begins. Do not clear the
+  // timer when loading ends early — that is what prolongs the animation.
+  useEffect(() => {
+    if (!isLoading) return;
+
+    if (typingHoldTimerRef.current !== null) {
+      window.clearTimeout(typingHoldTimerRef.current);
+      typingHoldTimerRef.current = null;
+    }
+
+    if (typingHoldMs <= 0) {
+      setTypingHoldActive(false);
+      return;
+    }
+
+    setTypingHoldActive(true);
+    typingHoldTimerRef.current = window.setTimeout(() => {
+      typingHoldTimerRef.current = null;
+      setTypingHoldActive(false);
+    }, typingHoldMs);
+  }, [isLoading, typingHoldMs]);
+
+  // Cancel hold on failure / abort (no assistant content to reveal).
+  useEffect(() => {
+    if (isLoading || lastAssistantTextLen > 0 || !typingHoldActive) return;
+    if (typingHoldTimerRef.current !== null) {
+      window.clearTimeout(typingHoldTimerRef.current);
+      typingHoldTimerRef.current = null;
+    }
+    setTypingHoldActive(false);
+  }, [isLoading, lastAssistantTextLen, typingHoldActive]);
+
+  useEffect(() => {
+    return () => {
+      if (typingHoldTimerRef.current !== null) {
+        window.clearTimeout(typingHoldTimerRef.current);
+      }
+    };
+  }, []);
+
   // Compare raw reveal → raw full. Sanitized display is shorter when board
   // markers exist, which would falsely keep "catching up" forever.
   const lastRevealedRawLen = lastDisplayedRaw.length;
-  const awaitingFirstToken =
-    isLoading &&
-    (messages.length === 0 ||
-      lastMsg?.role === "user" ||
-      lastAssistantTextLen === 0);
   const isStreaming =
-    isLoading && lastMsg?.role === "assistant" && lastRevealedRawLen > 0;
+    isLoading &&
+    !showTypingIndicator &&
+    lastMsg?.role === "assistant" &&
+    lastRevealedRawLen > 0;
   const isCatchingUp =
     !isLoading &&
+    !showTypingIndicator &&
     lastMsg?.role === "assistant" &&
     charsPerSecond !== null &&
     lastRevealedRawLen < lastAssistantTextLen;
@@ -157,7 +226,7 @@ export function ChatMessages({
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
       }
     }
-  }, [messages, isLoading, isStreaming, isCatchingUp, lastRevealedRawLen]);
+  }, [messages, isLoading, isStreaming, isCatchingUp, lastRevealedRawLen, showTypingIndicator]);
 
   if (messages.length === 0 && !isLoading) {
     return (
@@ -184,6 +253,13 @@ export function ChatMessages({
             index === messages.length - 1 &&
             message.role === "assistant" &&
             isLiveAssistant;
+
+          // Hide the live assistant bubble while the typing indicator is up
+          // (empty stream stub, or Dev Mode hold with tokens buffered).
+          if (isLive && showTypingIndicator) {
+            return null;
+          }
+
           const hideUntilReady =
             isLive && (isLoading || revealPaused || isCatchingUp);
           return (
@@ -199,18 +275,7 @@ export function ChatMessages({
           );
         })}
 
-        {awaitingFirstToken && (
-          <div className="flex gap-3 px-1">
-            <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-secondary text-secondary-foreground">
-              <Bot className="h-4 w-4" />
-            </div>
-            <div className="max-w-[80%] space-y-2 rounded-2xl rounded-tl-sm bg-secondary px-4 py-3">
-              <Skeleton className="h-3 w-32" />
-              <Skeleton className="h-3 w-48" />
-              <Skeleton className="h-3 w-24" />
-            </div>
-          </div>
-        )}
+        {showTypingIndicator && <TypingIndicator />}
 
         <div ref={bottomRef} />
       </div>
