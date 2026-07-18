@@ -9,6 +9,7 @@ import { Bot } from "lucide-react";
 import { useTextReveal } from "@/hooks/useTextReveal";
 import { speedToCharsPerSecond } from "@/lib/chat/textReveal";
 import { stripIncompleteMathDelimiters } from "@/lib/chat/extractEquations";
+import { sanitizeBoardTextForDisplay } from "@/lib/chat/extractBoardText";
 
 interface ChatMessagesProps {
   messages: UIMessage[];
@@ -78,10 +79,12 @@ export function ChatMessages({
     isLiveAssistant ? lastMsg.id : undefined,
     revealPaused
   );
-  // Never flash `$$` / unclosed math in the chat UI
+  // Never flash `$$` / unclosed math or `[[board:` markers in the chat UI
   const lastDisplayedText = isLiveAssistant
-    ? stripIncompleteMathDelimiters(lastDisplayedRaw)
-    : lastDisplayedRaw;
+    ? sanitizeBoardTextForDisplay(
+        stripIncompleteMathDelimiters(lastDisplayedRaw)
+      )
+    : sanitizeBoardTextForDisplay(lastDisplayedRaw);
 
   // Report the *raw* reveal (including complete math) so extraction can fire
   // as soon as an equation closes — even while display hides the delimiters.
@@ -98,19 +101,21 @@ export function ChatMessages({
   ]);
 
   const lastAssistantTextLen = lastAssistantFullText.length;
-  const lastDisplayedLen = lastDisplayedText.length;
+  // Compare raw reveal → raw full. Sanitized display is shorter when board
+  // markers exist, which would falsely keep "catching up" forever.
+  const lastRevealedRawLen = lastDisplayedRaw.length;
   const awaitingFirstToken =
     isLoading &&
     (messages.length === 0 ||
       lastMsg?.role === "user" ||
       lastAssistantTextLen === 0);
   const isStreaming =
-    isLoading && lastMsg?.role === "assistant" && lastDisplayedLen > 0;
+    isLoading && lastMsg?.role === "assistant" && lastRevealedRawLen > 0;
   const isCatchingUp =
     !isLoading &&
     lastMsg?.role === "assistant" &&
     charsPerSecond !== null &&
-    lastDisplayedLen < lastAssistantTextLen;
+    lastRevealedRawLen < lastAssistantTextLen;
 
   useEffect(() => {
     onCatchingUpChange?.(isCatchingUp);
@@ -152,7 +157,7 @@ export function ChatMessages({
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
       }
     }
-  }, [messages, isLoading, isStreaming, isCatchingUp, lastDisplayedLen]);
+  }, [messages, isLoading, isStreaming, isCatchingUp, lastRevealedRawLen]);
 
   if (messages.length === 0 && !isLoading) {
     return (

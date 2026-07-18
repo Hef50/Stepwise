@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect, useRef, type FormEvent } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { AlertTriangle, Trash2, Zap } from "lucide-react";
+import { AlertTriangle, RefreshCw, Trash2, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -17,12 +17,15 @@ import { ChatInput } from "./ChatInput";
 import { CourseMaterialsBar } from "./CourseMaterialsBar";
 import { TextSpeedSlider } from "./TextSpeedSlider";
 import { LatexFontSizeSlider } from "./LatexFontSizeSlider";
+import { WhiteboardTextControls } from "./WhiteboardTextControls";
 import { loadTextSpeed, saveTextSpeed } from "@/lib/chat/textReveal";
 import { useVoiceTA } from "@/hooks/useVoiceTA";
 import { useChatPersistence } from "@/hooks/useChatPersistence";
 import { useCourseMaterials, toMessageAttachment } from "@/hooks/useCourseMaterials";
 import { detectWhiteboardIntent } from "@/lib/chat/whiteboardIntent";
 import { extractNewEquations } from "@/lib/chat/extractEquations";
+import { extractNewBoardText } from "@/lib/chat/extractBoardText";
+import type { WhiteboardTextMode } from "@/lib/whiteboard/textStyle";
 import type {
   UploadedFile,
   CanvasPayload,
@@ -30,6 +33,7 @@ import type {
   ChatProvider,
   MessagePdfAttachment,
   StepwiseMessageMetadata,
+  WhiteboardDrawQueueItem,
 } from "@/lib/types";
 
 type StepwiseUIMessage = UIMessage<StepwiseMessageMetadata>;
@@ -38,38 +42,130 @@ interface ChatPanelProps {
   captureWhiteboard: () => Promise<CanvasPayload | null>;
   /** Routes a LaTeX string to the tldraw canvas as an animated shape. Returns the created shape id or null. */
   renderLatexOnCanvas?: (latex: string, displayMode?: boolean) => Promise<string | null>;
+  /** Routes short handwritten text to the tldraw canvas. Returns the created shape id or null. */
+  renderTextOnCanvas?: (text: string) => Promise<string | null>;
   /** Pan + zoom the canvas to focus on the given tldraw shape id. */
   focusLatexShape?: (shapeId: string) => void;
   /** Current on-canvas LaTeX font size (px ≈ 1em). */
   latexFontSize?: number;
   /** Persist + apply a new LaTeX font size across existing shapes. */
   onLatexFontSizeChange?: (size: number) => void;
+  wbTextSize?: number;
+  onWbTextSizeChange?: (size: number) => void;
+  wbTextColor?: string;
+  onWbTextColorChange?: (color: string) => void;
+  wbTextMode?: WhiteboardTextMode;
+  onWbTextModeChange?: (mode: WhiteboardTextMode) => void;
   /** Wipe the whiteboard document (shapes + IndexedDB persistence). */
   onClearWhiteboard?: () => Promise<void> | void;
   /** True once the tldraw editor has mounted and can accept shapes. */
   editorReady?: boolean;
   onActiveModelChange?: (model: ActiveModel) => void;
+  /** Session Dev Mode — enables smoke-test shortcut and failure injection. */
+  devMode?: boolean;
+  /** When true (and Dev Mode), LLM7 requests are forced to fail. */
+  forceLlm7Fail?: boolean;
 }
 
 function isRateLimitError(error: Error | null | undefined): boolean {
   if (!error) return false;
   const msg = error.message ?? "";
+  const lower = msg.toLowerCase();
   return (
     msg.includes("GEMMA_RATE_LIMITED") ||
+    msg.includes("LLM7_RATE_LIMITED") ||
     msg.includes("429") ||
-    msg.toLowerCase().includes("rate")
+    lower.includes("rate limit") ||
+    lower.includes("rate_limit") ||
+    lower.includes("too many requests")
   );
+}
+
+/** Map stream / HTTP error tokens into a short student-facing explanation. */
+function formatChatErrorMessage(
+  error: Error | null | undefined,
+  failedOn: ChatProvider
+): string {
+  const msg = error?.message ?? "";
+
+  if (
+    msg.includes("LLM7_FORBIDDEN") ||
+    msg.includes("upstream_forbidden") ||
+    msg.includes("403")
+  ) {
+    return "LLM7 refused the request (upstream forbidden). Retry, or try Gemma 4 instead.";
+  }
+  if (msg.includes("LLM7_REJECTED") || msg.includes("LLM7 rejected")) {
+    return "LLM7 rejected the request. Retrying or switching providers may help.";
+  }
+  if (msg.includes("LLM7_RATE_LIMITED")) {
+    return "LLM7 is rate limited. Wait a moment and retry, or try Gemma 4.";
+  }
+  if (msg.includes("LLM7_FAILED")) {
+    return "LLM7 failed to respond. You can retry the same prompt or try Gemma 4.";
+  }
+  if (msg.includes("GEMMA_FAILED")) {
+    return "Gemma 4 via OpenRouter failed. You can retry or switch back to LLM7.";
+  }
+  if (msg.includes("GEMMA_RATE_LIMITED")) {
+    return "Gemma 4 (free tier) is temporarily overloaded.";
+  }
+
+  const cleaned = msg.replace(/^Error:\s*/i, "").trim().slice(0, 180);
+  if (cleaned) return cleaned;
+
+  return failedOn === "gemma"
+    ? "Gemma 4 via OpenRouter returned an error."
+    : "The LLM provider returned an error.";
+}
+
+function getLastUserText(messages: StepwiseUIMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== "user") continue;
+    return message.parts
+      .filter((part): part is { type: "text"; text: string } => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
+  }
+  return "";
+}
+
+/** Extra body flags shared by sendMessage / regenerate in Dev Mode. */
+function buildDevChatBodyFlags(
+  text: string,
+  devMode: boolean,
+  forceLlm7Fail: boolean
+): { forceLlm7Fail?: true; smokeTest?: true } {
+  if (!devMode) return {};
+  const flags: { forceLlm7Fail?: true; smokeTest?: true } = {};
+  if (text.trim() === "t") {
+    flags.smokeTest = true;
+  } else if (forceLlm7Fail) {
+    // Smoke test wins over forced failure when both would apply
+    flags.forceLlm7Fail = true;
+  }
+  return flags;
 }
 
 export function ChatPanel({
   captureWhiteboard,
   renderLatexOnCanvas,
+  renderTextOnCanvas,
   focusLatexShape,
   latexFontSize,
   onLatexFontSizeChange,
+  wbTextSize,
+  onWbTextSizeChange,
+  wbTextColor,
+  onWbTextColorChange,
+  wbTextMode,
+  onWbTextModeChange,
   onClearWhiteboard,
   editorReady = false,
   onActiveModelChange,
+  devMode = false,
+  forceLlm7Fail = false,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<UploadedFile[]>([]);
@@ -83,18 +179,20 @@ export function ChatPanel({
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
   const courseMaterials = useCourseMaterials();
 
-  // ── Equation canvas sync ─────────────────────────────────────────────────
+  // ── Equation / text canvas sync ──────────────────────────────────────────
   /** Equations already rendered on the whiteboard (normalized latex → shapeId) */
   const equationShapeMapRef = useRef<Map<string, string>>(new Map());
   /** Set of normalized latex strings sent to the whiteboard (prevents re-sending) */
   const renderedEquationsRef = useRef<Set<string>>(new Set());
+  /** Set of normalized board-text labels already sent (prevents re-sending) */
+  const renderedBoardTextRef = useRef<Set<string>>(new Set());
   /** Throttled reveal text from ChatMessages — extraction keys off this, not the raw stream. */
   const [revealedText, setRevealedText] = useState("");
   /**
-   * Serial draw queue: at most one equation animates at a time, and text reveal
-   * is paused while a draw is in flight.
+   * Serial draw queue: at most one shape animates at a time, and text reveal
+   * is paused while a draw is in flight. Preserves latex/text emission order.
    */
-  const drawQueueRef = useRef<string[]>([]);
+  const drawQueueRef = useRef<WhiteboardDrawQueueItem[]>([]);
   const drawingRef = useRef(false);
   const [revealPaused, setRevealPaused] = useState(false);
   /** Latex strings whose whiteboard draw has finished — unlocks chat cards. */
@@ -103,6 +201,8 @@ export function ChatPanel({
   );
   const renderLatexRef = useRef(renderLatexOnCanvas);
   renderLatexRef.current = renderLatexOnCanvas;
+  const renderTextRef = useRef(renderTextOnCanvas);
+  renderTextRef.current = renderTextOnCanvas;
 
   const markEquationReady = useCallback((latex: string) => {
     const key = latex.trim();
@@ -118,16 +218,35 @@ export function ChatPanel({
     const key = latex.trim();
     if (!key) return;
     if (renderedEquationsRef.current.has(key)) return;
-    if (drawQueueRef.current.some((q) => q.trim() === key)) return;
+    if (
+      drawQueueRef.current.some(
+        (q) => q.kind === "latex" && q.content.trim() === key
+      )
+    ) {
+      return;
+    }
     renderedEquationsRef.current.add(key);
-    drawQueueRef.current.push(latex);
+    drawQueueRef.current.push({ kind: "latex", content: latex });
+  }, []);
+
+  const enqueueTextDraw = useCallback((text: string) => {
+    const key = text.trim().toLowerCase();
+    if (!key) return;
+    if (renderedBoardTextRef.current.has(key)) return;
+    if (
+      drawQueueRef.current.some(
+        (q) => q.kind === "text" && q.content.trim().toLowerCase() === key
+      )
+    ) {
+      return;
+    }
+    renderedBoardTextRef.current.add(key);
+    drawQueueRef.current.push({ kind: "text", content: text.trim() });
   }, []);
 
   const processDrawQueue = useCallback(async () => {
     if (drawingRef.current) return;
     if (!editorReady) return;
-    const render = renderLatexRef.current;
-    if (!render) return;
     if (drawQueueRef.current.length === 0) return;
 
     drawingRef.current = true;
@@ -135,22 +254,42 @@ export function ChatPanel({
 
     try {
       while (drawQueueRef.current.length > 0) {
-        const eq = drawQueueRef.current.shift();
-        if (!eq) break;
-        const shapeId = await render(eq, true);
-        if (shapeId) {
-          equationShapeMapRef.current.set(eq.trim(), shapeId);
-          markEquationReady(eq);
+        const item = drawQueueRef.current.shift();
+        if (!item) break;
+
+        if (item.kind === "latex") {
+          const render = renderLatexRef.current;
+          if (!render) {
+            renderedEquationsRef.current.delete(item.content.trim());
+            continue;
+          }
+          const shapeId = await render(item.content, true);
+          if (shapeId) {
+            equationShapeMapRef.current.set(item.content.trim(), shapeId);
+            markEquationReady(item.content);
+          } else {
+            renderedEquationsRef.current.delete(item.content.trim());
+          }
         } else {
-          // Allow a later retry if placement failed
-          renderedEquationsRef.current.delete(eq.trim());
+          const render = renderTextRef.current;
+          if (!render) {
+            renderedBoardTextRef.current.delete(
+              item.content.trim().toLowerCase()
+            );
+            continue;
+          }
+          const shapeId = await render(item.content);
+          if (!shapeId) {
+            renderedBoardTextRef.current.delete(
+              item.content.trim().toLowerCase()
+            );
+          }
         }
       }
     } finally {
       const hasMore = drawQueueRef.current.length > 0;
       drawingRef.current = false;
       if (hasMore) {
-        // Keep text paused; immediately continue the queue
         void processDrawQueue();
       } else {
         setRevealPaused(false);
@@ -161,6 +300,8 @@ export function ChatPanel({
   // Keep stable refs for useChat.onToolCall (may capture an early closure)
   const enqueueLatexDrawRef = useRef(enqueueLatexDraw);
   enqueueLatexDrawRef.current = enqueueLatexDraw;
+  const enqueueTextDrawRef = useRef(enqueueTextDraw);
+  enqueueTextDrawRef.current = enqueueTextDraw;
   const processDrawQueueRef = useRef(processDrawQueue);
   processDrawQueueRef.current = processDrawQueue;
 
@@ -176,7 +317,7 @@ export function ChatPanel({
     saveTextSpeed(speed);
   }, []);
 
-  const { messages, sendMessage, setMessages, status, stop, error, addToolOutput } =
+  const { messages, sendMessage, setMessages, status, stop, error, clearError, regenerate, addToolOutput } =
     useChat<StepwiseUIMessage>({
       transport: new DefaultChatTransport({ api: "/api/chat" }),
       messages: [],
@@ -191,14 +332,27 @@ export function ChatPanel({
             displayMode?: boolean;
           };
 
-          // Serialise through the same draw queue as prose-extracted equations
-          // so only one equation draws at a time and text pauses during it.
           enqueueLatexDrawRef.current(latex);
           void processDrawQueueRef.current();
 
-          // Acknowledge the tool call immediately so the AI stream can continue
           addToolOutput({
             tool: "render_math_whiteboard",
+            toolCallId: toolCall.toolCallId,
+            output: { rendered: true },
+          });
+        }
+
+        if (toolCall.toolName === "render_text_whiteboard") {
+          const { text } = toolCall.input as {
+            text: string;
+            kind?: "label" | "title" | "note";
+          };
+
+          enqueueTextDrawRef.current(text);
+          void processDrawQueueRef.current();
+
+          addToolOutput({
+            tool: "render_text_whiteboard",
             toolCallId: toolCall.toolCallId,
             output: { rendered: true },
           });
@@ -218,6 +372,7 @@ export function ChatPanel({
     drawQueueRef.current = [];
     drawingRef.current = false;
     setRevealPaused(false);
+    setIsCatchingUpReveal(false);
 
     const cutoff = revealedText.trimEnd();
     if (!cutoff) return;
@@ -241,7 +396,9 @@ export function ChatPanel({
     status === "streaming" ||
     status === "submitted" ||
     courseMaterials.isAdding;
-  const isRateLimited = status === "error" && escalated && isRateLimitError(error);
+  const isChatError = status === "error" && !!error;
+  const isRateLimited = isChatError && isRateLimitError(error);
+  const showGenericChatError = isChatError && !isRateLimited;
 
   // Restore persisted messages after hydration (client-only)
   useEffect(() => {
@@ -267,27 +424,59 @@ export function ChatPanel({
     }
   }, [messages, saveMessages]);
 
-  // ── Reveal-synced equation extraction → whiteboard ───────────────────────
-  // Keyed off the throttled `revealedText` so equations are queued only once
+  // ── Reveal-synced equation + board-text extraction → whiteboard ──────────
+  // Keyed off the throttled `revealedText` so items are queued only once
   // the chat has visibly typed that far. The draw queue serialises animation
   // (one at a time) and pauses text reveal while a draw is in flight.
   useEffect(() => {
-    if (!renderLatexOnCanvas || !revealedText || !editorReady) return;
+    if (!revealedText || !editorReady) return;
 
-    const newEqs = extractNewEquations(
-      revealedText,
-      renderedEquationsRef.current
-    );
-    if (newEqs.length === 0) return;
+    let queued = false;
 
-    // extractNewEquations already marked these as seen
-    for (const eq of newEqs) {
-      if (!drawQueueRef.current.some((q) => q.trim() === eq.trim())) {
-        drawQueueRef.current.push(eq);
+    if (renderLatexOnCanvas) {
+      const newEqs = extractNewEquations(
+        revealedText,
+        renderedEquationsRef.current
+      );
+      for (const eq of newEqs) {
+        if (
+          !drawQueueRef.current.some(
+            (q) => q.kind === "latex" && q.content.trim() === eq.trim()
+          )
+        ) {
+          drawQueueRef.current.push({ kind: "latex", content: eq });
+          queued = true;
+        }
       }
     }
-    void processDrawQueue();
-  }, [revealedText, renderLatexOnCanvas, editorReady, processDrawQueue]);
+
+    if (renderTextOnCanvas) {
+      const newLabels = extractNewBoardText(
+        revealedText,
+        renderedBoardTextRef.current
+      );
+      for (const label of newLabels) {
+        if (
+          !drawQueueRef.current.some(
+            (q) =>
+              q.kind === "text" &&
+              q.content.trim().toLowerCase() === label.trim().toLowerCase()
+          )
+        ) {
+          drawQueueRef.current.push({ kind: "text", content: label });
+          queued = true;
+        }
+      }
+    }
+
+    if (queued) void processDrawQueue();
+  }, [
+    revealedText,
+    renderLatexOnCanvas,
+    renderTextOnCanvas,
+    editorReady,
+    processDrawQueue,
+  ]);
 
   /** Pan + zoom the tldraw canvas to the shape linked to `latex`. */
   const focusEquation = useCallback(
@@ -342,12 +531,27 @@ export function ChatPanel({
 
       sendMessage(
         { parts, metadata },
-        { body: { provider: effectiveProvider, forceWhiteboard } }
+        {
+          body: {
+            provider: effectiveProvider,
+            forceWhiteboard,
+            ...buildDevChatBodyFlags(trimmed, devMode, forceLlm7Fail),
+          },
+        }
       );
       setInput("");
       setFiles([]);
     },
-    [input, files, isLoading, escalated, sendMessage, courseMaterials.enabledMaterials]
+    [
+      input,
+      files,
+      isLoading,
+      escalated,
+      sendMessage,
+      courseMaterials.enabledMaterials,
+      devMode,
+      forceLlm7Fail,
+    ]
   );
 
   const handleCaptureWhiteboard = useCallback(async () => {
@@ -371,9 +575,41 @@ export function ChatPanel({
 
   /** Downgrade to LLM7 after a Gemma rate limit — images in history stay but won't be re-analysed */
   const handleDowngradeToLlm7 = useCallback(() => {
+    clearError();
     setEscalated(false);
     setManuallyDowngraded(true);
-  }, []);
+  }, [clearError]);
+
+  /** Re-run the last user prompt on the current provider. */
+  const handleRetry = useCallback(() => {
+    const lastUserText = getLastUserText(messages);
+    const forceWhiteboard = detectWhiteboardIntent(lastUserText);
+    clearError();
+    void regenerate({
+      body: {
+        provider,
+        forceWhiteboard,
+        ...buildDevChatBodyFlags(lastUserText, devMode, forceLlm7Fail),
+      },
+    });
+  }, [messages, clearError, regenerate, provider, devMode, forceLlm7Fail]);
+
+  /** Escalate a failed LLM7 request to OpenRouter Gemma 4 and regenerate. */
+  const handleEscalateToGemma = useCallback(() => {
+    const lastUserText = getLastUserText(messages);
+    const forceWhiteboard = detectWhiteboardIntent(lastUserText);
+    clearError();
+    setEscalated(true);
+    setManuallyDowngraded(false);
+    void regenerate({
+      body: {
+        provider: "gemma" satisfies ChatProvider,
+        forceWhiteboard,
+        // Never force-fail Gemma; still allow smoke test if last message was "t"
+        ...buildDevChatBodyFlags(lastUserText, devMode, false),
+      },
+    });
+  }, [messages, clearError, regenerate, devMode]);
 
   const handleDeleteMessage = useCallback(
     (id: string) => {
@@ -388,6 +624,7 @@ export function ChatPanel({
     clearSession();
     equationShapeMapRef.current.clear();
     renderedEquationsRef.current.clear();
+    renderedBoardTextRef.current.clear();
     drawQueueRef.current = [];
     drawingRef.current = false;
     setRevealPaused(false);
@@ -426,6 +663,21 @@ export function ChatPanel({
                 onChange={onLatexFontSizeChange}
               />
             )}
+            {wbTextSize !== undefined &&
+              onWbTextSizeChange &&
+              wbTextColor !== undefined &&
+              onWbTextColorChange &&
+              wbTextMode !== undefined &&
+              onWbTextModeChange && (
+                <WhiteboardTextControls
+                  size={wbTextSize}
+                  onSizeChange={onWbTextSizeChange}
+                  color={wbTextColor}
+                  onColorChange={onWbTextColorChange}
+                  mode={wbTextMode}
+                  onModeChange={onWbTextModeChange}
+                />
+              )}
             <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -469,19 +721,94 @@ export function ChatPanel({
                   Rate limited — try again in a moment
                 </p>
                 <p className="mt-0.5 text-xs text-amber-700 dark:text-amber-400">
-                  Gemma 4 (free tier) is temporarily overloaded.
+                  {formatChatErrorMessage(error, provider)}
                 </p>
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Button
                     type="button"
                     size="sm"
                     variant="outline"
-                    className="h-7 gap-1.5 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
-                    onClick={handleDowngradeToLlm7}
+                    className="h-9 min-w-11 gap-1.5 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                    onClick={handleRetry}
                   >
-                    <Zap className="h-3 w-3" />
-                    Switch to LLM7
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Retry
                   </Button>
+                  {escalated ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-9 min-w-11 gap-1.5 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                      onClick={handleDowngradeToLlm7}
+                    >
+                      <Zap className="h-3.5 w-3.5" />
+                      Switch to LLM7
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-9 min-w-11 gap-1.5 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                      onClick={handleEscalateToGemma}
+                    >
+                      <Zap className="h-3.5 w-3.5" />
+                      Try Gemma 4 instead
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Generic LLM provider failure banner */}
+        {showGenericChatError && (
+          <div className="mx-3 mb-2 rounded-lg border border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-950/40 px-3 py-2.5 text-sm">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-600 dark:text-red-400" />
+              <div className="flex-1">
+                <p className="font-medium text-red-800 dark:text-red-300">
+                  LLM API failed
+                </p>
+                <p className="mt-0.5 text-xs text-red-700 dark:text-red-400">
+                  {formatChatErrorMessage(error, provider)}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-9 min-w-11 gap-1.5 border-red-300 dark:border-red-800 text-red-800 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40"
+                    onClick={handleRetry}
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Retry
+                  </Button>
+                  {!escalated ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-9 min-w-11 gap-1.5 border-red-300 dark:border-red-800 text-red-800 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40"
+                      onClick={handleEscalateToGemma}
+                    >
+                      <Zap className="h-3.5 w-3.5" />
+                      Try Gemma 4 instead
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-9 min-w-11 gap-1.5 border-red-300 dark:border-red-800 text-red-800 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40"
+                      onClick={handleDowngradeToLlm7}
+                    >
+                      <Zap className="h-3.5 w-3.5" />
+                      Switch to LLM7
+                    </Button>
+                  )}
                 </div>
               </div>
             </div>
@@ -489,7 +816,7 @@ export function ChatPanel({
         )}
 
         {/* Warning banner shown after manual downgrade */}
-        {manuallyDowngraded && !isRateLimited && (
+        {manuallyDowngraded && !isChatError && (
           <div className="mx-3 mb-2 rounded-lg border border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/40 px-3 py-2 text-xs text-blue-700 dark:text-blue-300">
             <p className="flex items-center gap-1.5">
               <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />

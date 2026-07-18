@@ -8,6 +8,7 @@ import {
   segmentTextWithEquations,
   stripIncompleteMathDelimiters,
 } from "@/lib/chat/extractEquations";
+import { sanitizeBoardTextForDisplay } from "@/lib/chat/extractBoardText";
 
 interface MessageRendererProps {
   content: string;
@@ -160,7 +161,9 @@ function TextBlock({
   hideUntilReady,
 }: TextBlockProps) {
   const segments = useMemo(() => {
-    const cleaned = stripIncompleteMathDelimiters(content);
+    const cleaned = sanitizeBoardTextForDisplay(
+      stripIncompleteMathDelimiters(content)
+    );
     return segmentTextWithEquations(cleaned, {
       readyEquations,
       hideUntilReady,

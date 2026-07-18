@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useWhiteboardCapture } from "@/hooks/useWhiteboardCapture";
 import { useWhiteboardMath } from "@/hooks/useWhiteboardMath";
 import { ModelStatusBadge } from "./ModelStatusBadge";
+import { DevModeControls } from "./DevModeControls";
 import type { AppMode, ActiveModel } from "@/lib/types";
 
 // ChatPanel uses localStorage + browser-only APIs; ssr:false prevents hydration mismatches
@@ -53,14 +54,24 @@ export function AppShell() {
   const { editorRef, capture } = useWhiteboardCapture();
   const {
     renderLatex,
+    renderText,
     focusLatexShape,
     latexFontSize,
     setLatexFontSize,
+    wbTextSize,
+    setWbTextSize,
+    wbTextColor,
+    setWbTextColor,
+    wbTextMode,
+    setWbTextMode,
     clearWhiteboard,
   } = useWhiteboardMath(editorRef);
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH);
   const [mode, setMode] = useState<AppMode>("text");
   const [activeModel, setActiveModel] = useState<ActiveModel>("llm7");
+  /** Session-only Dev Mode extras (error injection, smoke test). */
+  const [devMode, setDevMode] = useState(false);
+  const [forceLlm7Fail, setForceLlm7Fail] = useState(false);
   /** Only one Tldraw instance may mount — both share the same persistenceKey. */
   const [isLargeScreen, setIsLargeScreen] = useState(true);
   const [editorReady, setEditorReady] = useState(false);
@@ -160,12 +171,21 @@ export function AppShell() {
       <ChatPanel
         captureWhiteboard={capture}
         renderLatexOnCanvas={renderLatex}
+        renderTextOnCanvas={renderText}
         focusLatexShape={focusLatexShape}
         latexFontSize={latexFontSize}
         onLatexFontSizeChange={setLatexFontSize}
+        wbTextSize={wbTextSize}
+        onWbTextSizeChange={setWbTextSize}
+        wbTextColor={wbTextColor}
+        onWbTextColorChange={setWbTextColor}
+        wbTextMode={wbTextMode}
+        onWbTextModeChange={setWbTextMode}
         onClearWhiteboard={clearWhiteboard}
         editorReady={editorReady}
         onActiveModelChange={setActiveModel}
+        devMode={devMode}
+        forceLlm7Fail={forceLlm7Fail}
       />
     );
 
@@ -200,6 +220,18 @@ export function AppShell() {
     </div>
   );
 
+  const headerRight = (
+    <div className="flex items-center gap-2">
+      <DevModeControls
+        devMode={devMode}
+        onDevModeChange={setDevMode}
+        forceLlm7Fail={forceLlm7Fail}
+        onForceLlm7FailChange={setForceLlm7Fail}
+      />
+      <ModelStatusBadge model={activeModel} />
+    </div>
+  );
+
   return (
     <>
       {/* ── Large screens: resizable side-by-side split ── */}
@@ -207,7 +239,7 @@ export function AppShell() {
         {/* Top bar with mode toggle + model badge */}
         <div className="flex flex-shrink-0 items-center justify-between border-b border-border bg-background px-4 py-2">
           {modeToggle}
-          <ModelStatusBadge model={activeModel} />
+          {headerRight}
         </div>
 
         <div className="flex flex-1 overflow-hidden">
@@ -251,7 +283,7 @@ export function AppShell() {
         {/* Top bar */}
         <div className="flex flex-shrink-0 items-center justify-between border-b border-border px-3 py-2">
           {modeToggle}
-          <ModelStatusBadge model={activeModel} />
+          {headerRight}
         </div>
 
         <Tabs defaultValue="chat" className="flex flex-1 flex-col overflow-hidden">

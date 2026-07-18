@@ -11,6 +11,11 @@ export type ActiveModel = "llm7" | "gemma" | "gemini-live";
 export interface ChatRequestBody {
   messages: unknown[];
   provider: ChatProvider;
+  forceWhiteboard?: boolean;
+  /** Dev Mode: force LLM7 path to fail (for error-banner testing). */
+  forceLlm7Fail?: boolean;
+  /** Dev Mode: stream a canned whiteboard smoke-test response (no LLM). */
+  smokeTest?: boolean;
 }
 
 // ─── Live Session ─────────────────────────────────────────────────────────────
@@ -59,6 +64,39 @@ export interface LatexAnimatedShapeProps {
   animate: boolean;
   /** Per-path draw duration (ms) baked at creation; 0 = no animation */
   stepMs: number;
+}
+
+/** Draw mode for handwritten whiteboard text */
+export type WhiteboardTextDrawMode = "stroke" | "outline";
+
+/** Props for the animated handwritten-text custom tldraw shape */
+export interface TextAnimatedShapeProps {
+  /** Original label / key-term string */
+  text: string;
+  /** Per-glyph SVG path elements to animate */
+  svgPaths: SvgPathData[];
+  /** viewBox string from opentype path layout */
+  viewBox: string;
+  /** Shape width in canvas units */
+  w: number;
+  /** Shape height in canvas units */
+  h: number;
+  /** When true, play stroke-draw animation once then settle */
+  animate: boolean;
+  /** Per-path draw duration (ms) baked at creation; 0 = no animation */
+  stepMs: number;
+  /** stroke = single-line pen; outline = filled handwriting font */
+  mode: WhiteboardTextDrawMode;
+  /** CSS color baked at creation */
+  color: string;
+  /** Font size (px) used when paths were generated — for rescale */
+  fontSize: number;
+}
+
+/** Unified whiteboard draw-queue item (equations + labels, emission order). */
+export interface WhiteboardDrawQueueItem {
+  kind: "latex" | "text";
+  content: string;
 }
 
 // ─── Chat / Persistence ───────────────────────────────────────────────────────

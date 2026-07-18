@@ -34,7 +34,9 @@ export function MessageBubble({
   // Exclude tool invocations that are silently routed to the canvas —
   // these must never surface in the chat UI regardless of their state.
   const visibleParts = message.parts.filter(
-    (p) => p.type !== "tool-render_math_whiteboard"
+    (p) =>
+      p.type !== "tool-render_math_whiteboard" &&
+      p.type !== "tool-render_text_whiteboard"
   );
 
   const textContent =

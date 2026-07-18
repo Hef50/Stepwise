@@ -4,9 +4,13 @@ import { useCallback } from "react";
 import { Tldraw, type Editor } from "@tldraw/tldraw";
 import "@tldraw/tldraw/tldraw.css";
 import { LatexAnimatedShapeUtil } from "./shapes/LatexAnimatedShapeUtil";
+import { TextAnimatedShapeUtil } from "./shapes/TextAnimatedShapeUtil";
 import { WHITEBOARD_PERSISTENCE_KEY } from "@/hooks/useWhiteboardMath";
 
-const CUSTOM_SHAPE_UTILS = [LatexAnimatedShapeUtil] as const;
+const CUSTOM_SHAPE_UTILS = [
+  LatexAnimatedShapeUtil,
+  TextAnimatedShapeUtil,
+] as const;
 
 interface WhiteboardProps {
   onEditorReady: (editor: Editor) => void;

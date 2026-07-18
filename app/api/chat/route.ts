@@ -11,6 +11,7 @@ import { llm7TextModel } from "@/lib/ai/llm7";
 import { openrouterGemma } from "@/lib/ai/openrouter";
 import { enrichMessagesWithPdfContext } from "@/lib/chat/pdfAttachments";
 import { detectWhiteboardIntent } from "@/lib/chat/whiteboardIntent";
+import { createSmokeTestStreamResponse } from "@/lib/dev/smokeTestStream";
 import type { ChatProvider } from "@/lib/types";
 
 const BASE_SYSTEM_PROMPT = `You are Stepwise, an expert AI tutor. You help students learn by breaking down complex concepts into clear, step-by-step explanations.
@@ -23,6 +24,12 @@ MATH RENDERING INSTRUCTIONS:
 - You may write surrounding explanatory prose in your message text, but every equation must go through the tool exclusively.
 - Use display mode (displayMode: true) for standalone equations and display mode false for short inline expressions only when context requires it.
 
+WHITEBOARD TEXT INSTRUCTIONS:
+- Use render_text_whiteboard SPARINGLY for short handwritten labels, titles, key terms, or brief takeaways on the whiteboard.
+- NEVER write full sentences on the whiteboard — max ~6 words (e.g. "Quadratic formula", "Key idea: chain rule", "Step 1").
+- Keep all explanatory prose in your chat message. The whiteboard is for scannable labels next to equations, not paragraphs.
+- Prefer one short label per major equation or section when it helps the student orient.
+
 TEACHING STYLE:
 - Be concise but thorough. Use numbered steps for procedures.
 - Use analogies and examples to clarify abstract concepts.
@@ -33,12 +40,15 @@ TEACHING STYLE:
 const WHITEBOARD_FORCE_ADDENDUM = `
 
 CRITICAL WHITEBOARD INSTRUCTION:
-The user has asked you to show or draw something on the whiteboard. You MUST call render_math_whiteboard at least once before writing any prose. For every equation, formula, or mathematical expression in your response, call render_math_whiteboard with its LaTeX. Do NOT write any equation as plain text.`;
+The user has asked you to show or draw something on the whiteboard. You MUST call render_math_whiteboard and/or render_text_whiteboard at least once before writing any prose. For every equation, formula, or mathematical expression in your response, call render_math_whiteboard with its LaTeX. Use render_text_whiteboard for short labels/titles only. Do NOT write any equation as plain text.`;
 
 /** System prompt used when the provider does not support tools (e.g. LLM7). */
 const NO_TOOLS_SYSTEM_PROMPT = `${BASE_SYSTEM_PROMPT}
 
-NOTE: Because this provider does not support tool calls, write every mathematical equation on its own line wrapped in $$ ... $$ (display math). Example: $$E = mc^2$$. The UI will render these as visual equation cards. Do NOT produce any diagrams.`;
+NOTE: Because this provider does not support tool calls:
+- Write every mathematical equation on its own line wrapped in $$ ... $$ (display math). Example: $$E = mc^2$$.
+- For short whiteboard labels/titles/key terms (max ~6 words, never full sentences), write [[board: Your label here]] inline. Example: [[board: Quadratic formula]]. Use sparingly.
+- The UI will render equations and board labels on the whiteboard. Do NOT produce any diagrams.`;
 
 const mathWhiteboardTool = {
   description:
@@ -59,15 +69,47 @@ const mathWhiteboardTool = {
   }),
 } as const;
 
+const textWhiteboardTool = {
+  description:
+    "Write a short handwritten label, title, or key term on the whiteboard. " +
+    "Use SPARINGLY — never full sentences. Max ~6 words. Keep explanatory prose in chat.",
+  inputSchema: z.object({
+    text: z
+      .string()
+      .describe(
+        'Short label only, e.g. "Quadratic formula" or "Key: chain rule" (max ~6 words)'
+      ),
+    kind: z
+      .enum(["label", "title", "note"])
+      .optional()
+      .describe("label (default), title, or note — all are short phrases"),
+  }),
+} as const;
+
+type WhiteboardTools = {
+  render_math_whiteboard: typeof mathWhiteboardTool;
+  render_text_whiteboard: typeof textWhiteboardTool;
+};
+
 interface ChatBody {
   messages: UIMessage[];
   provider?: ChatProvider;
   forceWhiteboard?: boolean;
+  /** Dev Mode: force LLM7 path to fail (for error-banner testing). */
+  forceLlm7Fail?: boolean;
+  /** Dev Mode: stream a canned whiteboard smoke-test response (no LLM). */
+  smokeTest?: boolean;
 }
 
 export async function POST(request: Request) {
   const body = (await request.json()) as ChatBody;
-  const { messages, provider = "llm7", forceWhiteboard: clientForceFlag = false } = body;
+  const {
+    messages,
+    provider = "llm7",
+    forceWhiteboard: clientForceFlag = false,
+    forceLlm7Fail = false,
+    smokeTest = false,
+  } = body;
 
   // Server-side intent re-check so the flag cannot be skipped accidentally
   const lastUserText = [...messages]
@@ -76,6 +118,16 @@ export async function POST(request: Request) {
     ?.parts.filter((p) => p.type === "text")
     .map((p) => (p.type === "text" ? p.text : ""))
     .join("") ?? "";
+
+  // Dev Mode smoke test (client sends smokeTest when Dev Mode is on and input is "t")
+  if (smokeTest) {
+    return createSmokeTestStreamResponse();
+  }
+
+  // Dev Mode: simulate an LLM7 provider failure for the error-banner UI
+  if (forceLlm7Fail && provider !== "gemma") {
+    return Response.json({ error: "LLM7_FAILED" }, { status: 500 });
+  }
 
   const forceWhiteboard = clientForceFlag || detectWhiteboardIntent(lastUserText);
 
@@ -92,9 +144,10 @@ export async function POST(request: Request) {
       BASE_SYSTEM_PROMPT + (forceWhiteboard ? WHITEBOARD_FORCE_ADDENDUM : "");
 
     // prepareStep: force tool call on the first two steps; release on step 3+
-    const prepareStep: PrepareStepFunction<
-      { render_math_whiteboard: typeof mathWhiteboardTool }
-    > = ({ steps, stepNumber }) => {
+    const prepareStep: PrepareStepFunction<WhiteboardTools> = ({
+      steps,
+      stepNumber,
+    }) => {
       const hasToolCall = steps.some(
         (s) => s.toolCalls && s.toolCalls.length > 0
       );
@@ -117,6 +170,7 @@ export async function POST(request: Request) {
         maxOutputTokens: 4096,
         tools: {
           render_math_whiteboard: mathWhiteboardTool,
+          render_text_whiteboard: textWhiteboardTool,
         },
         ...(forceWhiteboard
           ? {
@@ -135,7 +189,7 @@ export async function POST(request: Request) {
           if (APICallError.isInstance(error) && error.statusCode === 429) {
             return "GEMMA_RATE_LIMITED";
           }
-          return String(error);
+          return "GEMMA_FAILED";
         },
       });
     } catch (error) {
@@ -143,7 +197,7 @@ export async function POST(request: Request) {
         return Response.json({ error: "GEMMA_RATE_LIMITED" }, { status: 429 });
       }
       console.error("[chat] Gemma error:", error);
-      return Response.json({ error: "Internal server error" }, { status: 500 });
+      return Response.json({ error: "GEMMA_FAILED" }, { status: 500 });
     }
   }
 
@@ -157,18 +211,30 @@ export async function POST(request: Request) {
     });
 
     return result.toUIMessageStreamResponse({
-      onError: (error) => String(error),
+      onError: (error) => {
+        if (APICallError.isInstance(error)) {
+          if (error.statusCode === 403) return "LLM7_FORBIDDEN";
+          if (error.statusCode === 400) return "LLM7_REJECTED";
+          if (error.statusCode === 429) return "LLM7_RATE_LIMITED";
+        }
+        return "LLM7_FAILED";
+      },
     });
   } catch (error) {
-    // LLM7 sometimes 400s — surface a clean error
-    if (APICallError.isInstance(error) && error.statusCode === 400) {
-      console.error("[chat] LLM7 400 error:", error);
-      return Response.json(
-        { error: "LLM7 rejected the request" },
-        { status: 400 }
-      );
+    if (APICallError.isInstance(error)) {
+      if (error.statusCode === 400) {
+        console.error("[chat] LLM7 400 error:", error);
+        return Response.json({ error: "LLM7_REJECTED" }, { status: 400 });
+      }
+      if (error.statusCode === 403) {
+        console.error("[chat] LLM7 403 error:", error);
+        return Response.json({ error: "LLM7_FORBIDDEN" }, { status: 403 });
+      }
+      if (error.statusCode === 429) {
+        return Response.json({ error: "LLM7_RATE_LIMITED" }, { status: 429 });
+      }
     }
     console.error("[chat] Unexpected error:", error);
-    return Response.json({ error: "Internal server error" }, { status: 500 });
+    return Response.json({ error: "LLM7_FAILED" }, { status: 500 });
   }
 }

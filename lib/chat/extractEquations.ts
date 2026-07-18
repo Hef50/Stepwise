@@ -178,8 +178,46 @@ function findBareLatexCommandSpans(text: string): MatchSpan[] {
   return spans;
 }
 
+/**
+ * Earliest index of an unclosed display-math opener ($$, \[, ```math / ```latex),
+ * or -1 if every opener is properly closed.
+ *
+ * Used so we do not treat `\frac{...}` *inside* a still-streaming `$$` block as
+ * standalone whiteboard equations — that caused one "Go to equation" in chat but
+ * N fragmented shapes on the board.
+ */
+function findUnclosedDisplayMathStart(text: string): number {
+  const openers = [
+    { open: "$$", close: "$$" },
+    { open: "\\[", close: "\\]" },
+    { open: "```math", close: "```" },
+    { open: "```latex", close: "```" },
+  ];
+
+  let earliest = -1;
+  for (const { open, close } of openers) {
+    let from = 0;
+    while (from < text.length) {
+      const start = text.indexOf(open, from);
+      if (start === -1) break;
+      const afterOpen = start + open.length;
+      const end = text.indexOf(close, afterOpen);
+      if (end === -1) {
+        earliest = earliest === -1 ? start : Math.min(earliest, start);
+        break;
+      }
+      from = end + close.length;
+    }
+  }
+  return earliest;
+}
+
+function spansOverlap(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+  return aStart < bEnd && bStart < aEnd;
+}
+
 function findAllEquationSpans(text: string): MatchSpan[] {
-  const spans: MatchSpan[] = [];
+  const delimited: MatchSpan[] = [];
 
   for (const { re, kind } of [
     { re: RE_DISPLAY_DOLLAR, kind: "display" as const },
@@ -193,7 +231,7 @@ function findAllEquationSpans(text: string): MatchSpan[] {
     while ((m = re.exec(text)) !== null) {
       const latex = (m[1] ?? "").trim();
       if (latex) {
-        spans.push({
+        delimited.push({
           start: m.index,
           end: m.index + m[0].length,
           latex,
@@ -203,18 +241,41 @@ function findAllEquationSpans(text: string): MatchSpan[] {
     }
   }
 
-  // Bare \frac{...}{...} etc. embedded in prose without $ delimiters
-  spans.push(...findBareLatexCommandSpans(text));
+  const spans: MatchSpan[] = [...delimited];
+  const unclosedDisplayStart = findUnclosedDisplayMathStart(text);
+
+  // Bare \frac{...}{...} etc. in prose — but never inside (or after an unclosed)
+  // delimited display/inline math, or we'd fragment streaming $$ equations.
+  for (const bare of findBareLatexCommandSpans(text)) {
+    if (unclosedDisplayStart !== -1 && bare.start >= unclosedDisplayStart) {
+      continue;
+    }
+    const insideDelimited = delimited.some((d) =>
+      spansOverlap(bare.start, bare.end, d.start, d.end)
+    );
+    if (insideDelimited) continue;
+    spans.push(bare);
+  }
 
   let pos = 0;
   for (const line of text.split("\n")) {
     if (isProseMathLine(line)) {
-      spans.push({
-        start: pos,
-        end: pos + line.length,
-        latex: line.trim(),
-        kind: "prose",
-      });
+      const lineStart = pos;
+      const lineEnd = pos + line.length;
+      // Skip prose "equations" that live inside delimited or unclosed display math
+      const insideDelimited = delimited.some((d) =>
+        spansOverlap(lineStart, lineEnd, d.start, d.end)
+      );
+      const insideUnclosed =
+        unclosedDisplayStart !== -1 && lineStart >= unclosedDisplayStart;
+      if (!insideDelimited && !insideUnclosed) {
+        spans.push({
+          start: lineStart,
+          end: lineEnd,
+          latex: line.trim(),
+          kind: "prose",
+        });
+      }
     }
     pos += line.length + 1;
   }
@@ -380,13 +441,17 @@ export function extractNewEquations(
 ): string[] {
   const result: string[] = [];
 
+  // Drop unfinished $$ / \[ / ```math tails so mid-stream content inside an
+  // open display block is never scanned for bare \frac fragments.
+  const completeText = stripIncompleteMathDelimiters(text);
+
   // Prefer text up to last newline for prose safety; delimited math still
   // works on the full string via findAllEquationSpans.
-  const safeText = text.includes("\n")
-    ? text.slice(0, text.lastIndexOf("\n") + 1)
-    : text;
+  const safeText = completeText.includes("\n")
+    ? completeText.slice(0, completeText.lastIndexOf("\n") + 1)
+    : completeText;
 
-  const spans = findAllEquationSpans(safeText || text);
+  const spans = findAllEquationSpans(safeText || completeText);
 
   for (const span of spans) {
     // Inline $x$ stays out of the whiteboard; bare \frac and display math go in
