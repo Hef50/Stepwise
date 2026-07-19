@@ -11,6 +11,7 @@ import {
 } from "@google/genai";
 import type { VoiceTranscriptEntry } from "@/lib/types";
 import { dataUrlMimeType, dataUrlToBase64 } from "@/lib/speech";
+import { isRateLimitMessage } from "@/lib/rateLimit";
 
 type LiveStatus = "idle" | "connecting" | "connected" | "muted" | "error";
 
@@ -25,6 +26,7 @@ export interface GeminiLiveState {
   inputCaption: string;
   outputCaption: string;
   error: string | null;
+  rateLimitReached: boolean;
   transcriptHistory: VoiceTranscriptEntry[];
   /** Increments after each completed conversation turn. */
   turnCount: number;
@@ -110,6 +112,7 @@ export function useGeminiLive(): GeminiLiveControls {
     inputCaption: "",
     outputCaption: "",
     error: null,
+    rateLimitReached: false,
     transcriptHistory: [],
     turnCount: 0,
     whiteboardSyncedAt: null,
@@ -256,13 +259,20 @@ export function useGeminiLive(): GeminiLiveControls {
     if (sessionRef.current || state.status === "connecting") return;
 
     manualDisconnectRef.current = false;
-    setState((prev) => ({ ...prev, status: "connecting", error: null }));
+    setState((prev) => ({
+      ...prev,
+      status: "connecting",
+      error: null,
+      rateLimitReached: false,
+    }));
 
     try {
       const tokenResponse = await fetch("/api/live-token", { method: "POST" });
       if (!tokenResponse.ok) {
         const data = (await tokenResponse.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(data?.error ?? `Live token request failed: ${tokenResponse.status}`);
+        const error = new Error(data?.error ?? `Live token request failed: ${tokenResponse.status}`);
+        error.name = tokenResponse.status === 429 ? "RateLimitError" : "LiveTokenError";
+        throw error;
       }
 
       const { token, model } = (await tokenResponse.json()) as LiveTokenResponse;
@@ -296,6 +306,7 @@ export function useGeminiLive(): GeminiLiveControls {
               status: micStreamRef.current ? "connected" : "muted",
               muted: !micStreamRef.current,
               error: null,
+              rateLimitReached: false,
             }));
           },
           onmessage: handleMessage,
@@ -309,6 +320,7 @@ export function useGeminiLive(): GeminiLiveControls {
               status: "error",
               muted: true,
               error: detail,
+              rateLimitReached: isRateLimitMessage(detail),
             }));
           },
           onclose: (event) => {
@@ -325,6 +337,9 @@ export function useGeminiLive(): GeminiLiveControls {
                 : prev.error ??
                   event.reason ??
                   `Gemini Live call closed unexpectedly${event.code ? ` (${event.code})` : ""}.`,
+              rateLimitReached: wasManualDisconnect
+                ? false
+                : prev.rateLimitReached || isRateLimitMessage(event.reason),
             }));
           },
         },
@@ -337,6 +352,10 @@ export function useGeminiLive(): GeminiLiveControls {
         status: "error",
         muted: true,
         error: err instanceof Error ? err.message : "Failed to connect to Gemini Live.",
+        rateLimitReached:
+          err instanceof Error
+            ? err.name === "RateLimitError" || isRateLimitMessage(err.message)
+            : false,
       }));
     }
   }, [handleMessage, state.status, stopMic]);
@@ -396,7 +415,13 @@ export function useGeminiLive(): GeminiLiveControls {
     processorRef.current = processor;
     silentGainRef.current = silentGain;
 
-    setState((prev) => ({ ...prev, status: "connected", muted: false, error: null }));
+    setState((prev) => ({
+      ...prev,
+      status: "connected",
+      muted: false,
+      error: null,
+      rateLimitReached: false,
+    }));
   }, [stopPlayback]);
 
   const toggleMute = useCallback(async () => {
@@ -422,6 +447,7 @@ export function useGeminiLive(): GeminiLiveControls {
           err instanceof Error
             ? err.message
             : "Could not start microphone. Check browser permissions.",
+        rateLimitReached: err instanceof Error ? isRateLimitMessage(err.message) : false,
       }));
     }
   }, [connect, startMic, stopMic]);
@@ -478,6 +504,7 @@ export function useGeminiLive(): GeminiLiveControls {
       muted: true,
       inputCaption: "",
       outputCaption: "",
+      rateLimitReached: false,
       turnCount: 0,
       whiteboardSyncedAt: null,
     }));

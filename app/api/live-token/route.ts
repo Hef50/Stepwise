@@ -1,4 +1,5 @@
 import { GoogleGenAI, Modality } from "@google/genai";
+import { isRateLimitError, rateLimitResponse } from "@/lib/rateLimit";
 
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL ?? "gemini-3.1-flash-live-preview";
 
@@ -51,6 +52,10 @@ export async function POST(): Promise<Response> {
     });
   } catch (err) {
     console.error("[live-token] Gemini auth token error:", err);
+    if (isRateLimitError(err)) {
+      return rateLimitResponse("Gemini Live rate limit reached. Please retry later.");
+    }
+
     return Response.json(
       {
         error:

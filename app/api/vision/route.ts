@@ -4,6 +4,7 @@ import {
   getOpenRouterClient,
   OPENROUTER_VISION_MODEL,
 } from "@/lib/ai/gemini";
+import { isRateLimitError, rateLimitResponse } from "@/lib/rateLimit";
 import type { VisionRequest, VisionResponse } from "@/lib/types";
 
 const DEFAULT_VISION_PROMPT =
@@ -105,9 +106,18 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  const analysis = hasOpenRouterKey
-    ? await analyzeWithOpenRouter(prompt, images)
-    : await analyzeWithGoogle(prompt, images);
+  let analysis = "";
+  try {
+    analysis = hasOpenRouterKey
+      ? await analyzeWithOpenRouter(prompt, images)
+      : await analyzeWithGoogle(prompt, images);
+  } catch (err) {
+    if (isRateLimitError(err)) {
+      return rateLimitResponse("Vision model rate limit reached. Please retry later.");
+    }
+
+    throw err;
+  }
 
   if (!analysis) {
     return Response.json(

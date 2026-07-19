@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect, useMemo, type FormEvent } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { MessageCircle, Mic2, Settings, Trash2, Type } from "lucide-react";
+import { MessageCircle, Mic2, RefreshCw, Settings, Trash2, Type } from "lucide-react";
 import { Dialog, DialogTrigger } from "@/components/ui/dialog";
 import SettingsPanel from "@/components/common/SettingsPanel";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,7 @@ import { AudioOnlyPanel } from "./AudioOnlyPanel";
 import { useVoiceTA } from "@/hooks/useVoiceTA";
 import { useGeminiLive } from "@/hooks/useGeminiLive";
 import { useChatPersistence } from "@/hooks/useChatPersistence";
+import { isRateLimitError } from "@/lib/rateLimit";
 import type { UploadedFile, CanvasPayload, InteractionMode } from "@/lib/types";
 
 interface ChatPanelProps {
@@ -27,79 +28,11 @@ interface ChatPanelProps {
 }
 
 const WHITEBOARD_VISION_PROMPT = `Analyze the provided whiteboard image for an AI tutor in a live session. Identify every equation, variable, symbol, diagram, graph, and written work shown. Transcribe mathematical notation exactly as written. Do not solve the problem yet; provide concise visual context the tutor can use to answer the student's question.`;
-const MIN_STREAM_SPEECH_CHARS = 450;
-const MAX_SPEECH_CHARS = 900;
 const MODE_MODEL_LABELS: Record<InteractionMode, string> = {
   text: "LLM7 fast",
   mixed: "LLM7 fast + Browser Speech",
   audio: "Gemini 3 Live",
 };
-
-function splitSpeechBlocks(text: string): string[] {
-  const blocks: string[] = [];
-  let remaining = text.trim();
-
-  while (remaining.length > 0) {
-    if (remaining.length <= MAX_SPEECH_CHARS) {
-      blocks.push(remaining);
-      break;
-    }
-
-    const slice = remaining.slice(0, MAX_SPEECH_CHARS);
-    const sentenceEnd = Math.max(
-      slice.lastIndexOf(". "),
-      slice.lastIndexOf("? "),
-      slice.lastIndexOf("! ")
-    );
-    const breakAt =
-      sentenceEnd >= MIN_STREAM_SPEECH_CHARS
-        ? sentenceEnd + 1
-        : Math.max(slice.lastIndexOf(" "), MIN_STREAM_SPEECH_CHARS);
-
-    blocks.push(remaining.slice(0, breakAt).trim());
-    remaining = remaining.slice(breakAt).trim();
-  }
-
-  return blocks.filter(Boolean);
-}
-
-function getReadySpeechSegments(
-  text: string,
-  startIndex: number,
-  includeTail: boolean
-): { nextIndex: number; segments: string[] } {
-  const remaining = text.slice(startIndex);
-  if (!remaining.trim()) return { nextIndex: startIndex, segments: [] };
-
-  if (includeTail) {
-    const segments = splitSpeechBlocks(remaining);
-    return {
-      nextIndex: text.length,
-      segments,
-    };
-  }
-
-  if (remaining.trim().length < MIN_STREAM_SPEECH_CHARS) {
-    return { nextIndex: startIndex, segments: [] };
-  }
-
-  const windowText = remaining.slice(0, MAX_SPEECH_CHARS);
-  const sentenceMatches = [...windowText.matchAll(/[^.!?]+[.!?]+(?=\s|$)/g)];
-  const candidateEnd = sentenceMatches.reduce((best, match) => {
-    const end = (match.index ?? 0) + match[0].length;
-    return end >= MIN_STREAM_SPEECH_CHARS ? end : best;
-  }, 0);
-
-  if (candidateEnd === 0) {
-    return { nextIndex: startIndex, segments: [] };
-  }
-
-  const segment = remaining.slice(0, candidateEnd).trim();
-  return {
-    nextIndex: startIndex + candidateEnd,
-    segments: segment ? [segment] : [],
-  };
-}
 
 async function analyzeVisualContext(
   question: string,
@@ -116,7 +49,14 @@ async function analyzeVisualContext(
     }),
   });
 
-  if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as
+      | { error?: string; rateLimited?: boolean }
+      | null;
+    const error = new Error(data?.error ?? `Vision API error: ${res.status}`);
+    error.name = res.status === 429 || data?.rateLimited ? "RateLimitError" : "VisionError";
+    throw error;
+  }
   const data = (await res.json()) as { analysis?: string };
   return data.analysis?.trim() || null;
 }
@@ -126,9 +66,10 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isPreparingContext, setIsPreparingContext] = useState(false);
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("text");
+  const [rateLimitLabel, setRateLimitLabel] = useState<string | null>(null);
   const lastWhiteboardCaptureRef = useRef<string | null>(null);
   const autoSpeechMessageRef = useRef<string | null>(null);
-  const autoSpeechCursorRef = useRef(0);
+  const lastSubmitTextRef = useRef("");
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
   const live = useGeminiLive();
   const {
@@ -142,17 +83,28 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const { messages, sendMessage, setMessages, status, stop } = useChat({
     transport: new DefaultChatTransport({ api: "/api/chat" }),
     messages: [],
+    onError: (error) => {
+      if (isRateLimitError(error)) {
+        setRateLimitLabel("Rate limit reached");
+      }
+    },
   });
 
   const isGenerating = status === "streaming" || status === "submitted";
   const isLoading = isGenerating || isPreparingContext;
   const activeModelLabel = MODE_MODEL_LABELS[interactionMode];
+  const visibleRateLimitLabel =
+    interactionMode === "audio" && liveState.rateLimitReached
+      ? "Rate limit reached"
+      : rateLimitLabel;
 
   const submitText = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || isLoading) return;
 
+      lastSubmitTextRef.current = trimmed;
+      setRateLimitLabel(null);
       setIsPreparingContext(true);
 
       try {
@@ -175,6 +127,9 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
         setFiles([]);
       } catch (err) {
         console.error("[ChatPanel] Visual context error:", err);
+        if (isRateLimitError(err)) {
+          setRateLimitLabel("Rate limit reached");
+        }
         sendMessage({ text: trimmed });
         setInput("");
         setFiles([]);
@@ -192,7 +147,7 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
       submitText(transcript);
     }, 80);
   });
-  const { cancelSpeech, enqueueSpeech, stopListening } = voice;
+  const { cancelSpeech, speak, stopListening } = voice;
 
   useEffect(() => {
     if (interactionMode !== "mixed") {
@@ -233,9 +188,12 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const handleSubmit = useCallback(
     (e: FormEvent<HTMLFormElement>) => {
       e.preventDefault();
+      if (interactionMode === "mixed") {
+        voice.preloadSpeech(input);
+      }
       submitText(input);
     },
-    [input, submitText]
+    [input, interactionMode, submitText, voice]
   );
 
   const latestAssistant = useMemo(() => {
@@ -260,37 +218,24 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
     if (
       interactionMode !== "mixed" ||
       isPreparingContext ||
+      isGenerating ||
       !latestAssistant.text ||
       !voice.state.soundEnabled
     ) {
       return;
     }
 
-    if (latestAssistant.id && latestAssistant.id !== autoSpeechMessageRef.current) {
-      autoSpeechMessageRef.current = latestAssistant.id;
-      autoSpeechCursorRef.current = 0;
-    }
+    if (!latestAssistant.id || latestAssistant.id === autoSpeechMessageRef.current) return;
 
-    if (autoSpeechCursorRef.current > latestAssistant.text.length) {
-      autoSpeechCursorRef.current = 0;
-    }
-
-    const { nextIndex, segments } = getReadySpeechSegments(
-      latestAssistant.text,
-      autoSpeechCursorRef.current,
-      !isGenerating
-    );
-    if (segments.length === 0) return;
-
-    segments.forEach((segment) => enqueueSpeech(segment));
-    autoSpeechCursorRef.current = nextIndex;
+    autoSpeechMessageRef.current = latestAssistant.id;
+    speak(latestAssistant.text);
   }, [
-    enqueueSpeech,
     interactionMode,
     isGenerating,
     isPreparingContext,
     latestAssistant.id,
     latestAssistant.text,
+    speak,
     voice.state.soundEnabled,
   ]);
 
@@ -328,7 +273,7 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
   const handleCaptureWhiteboard = useCallback(async () => {
     try {
       const analysis = await getWhiteboardAnalysis();
-      if (!analysis) return;
+    if (!analysis) return;
 
       sendMessage(
         { text: "Please analyze the whiteboard." },
@@ -336,8 +281,24 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
       );
     } catch (err) {
       console.error("[ChatPanel] Whiteboard vision error:", err);
+      if (isRateLimitError(err)) {
+        setRateLimitLabel("Rate limit reached");
+      }
     }
   }, [getWhiteboardAnalysis, sendMessage]);
+
+  const handleRateLimitRetry = useCallback(() => {
+    setRateLimitLabel(null);
+
+    if (interactionMode === "audio") {
+      void live.toggleMute();
+      return;
+    }
+
+    if (lastSubmitTextRef.current) {
+      void submitText(lastSubmitTextRef.current);
+    }
+  }, [interactionMode, live, submitText]);
 
   const isAudioCallActive =
     interactionMode === "audio" &&
@@ -470,6 +431,19 @@ export function ChatPanel({ captureWhiteboard }: ChatPanelProps) {
             <span className="font-medium text-foreground">Model:</span>{" "}
             {activeModelLabel}
           </p>
+          {visibleRateLimitLabel && (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-amber-300/70 bg-amber-50 px-2 py-1 text-[11px] text-amber-800 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-200">
+              <span>{visibleRateLimitLabel}</span>
+              <button
+                type="button"
+                onClick={handleRateLimitRetry}
+                className="inline-flex items-center gap-1 font-medium hover:underline"
+              >
+                <RefreshCw className="h-3 w-3" />
+                Retry
+              </button>
+            </div>
+          )}
         </div>
 
         <Separator />
