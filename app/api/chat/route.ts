@@ -7,8 +7,8 @@ import {
   type PrepareStepFunction,
 } from "ai";
 import { z } from "zod";
-import { llm7TextModel } from "@/lib/ai/llm7";
-import { openrouterGemma } from "@/lib/ai/openrouter";
+import { getLlm7TextModel } from "@/lib/ai/llm7";
+import { getOpenrouterGemma } from "@/lib/ai/openrouter";
 import { enrichMessagesWithPdfContext } from "@/lib/chat/pdfAttachments";
 import { detectWhiteboardIntent } from "@/lib/chat/whiteboardIntent";
 import { createSmokeTestStreamResponse } from "@/lib/dev/smokeTestStream";
@@ -153,7 +153,6 @@ export async function POST(request: Request) {
   const forceWhiteboard = clientForceFlag || detectWhiteboardIntent(lastUserText);
 
   const supportsTools = provider === "gemma";
-  const model = provider === "gemma" ? openrouterGemma : llm7TextModel;
 
   const modelMessages = await convertToModelMessages(
     enrichMessagesWithPdfContext(messages)
@@ -185,7 +184,7 @@ export async function POST(request: Request) {
 
     try {
       const result = streamText({
-        model,
+        model: getOpenrouterGemma(),
         system: systemPrompt,
         messages: modelMessages,
         maxOutputTokens: 4096,
@@ -226,7 +225,7 @@ export async function POST(request: Request) {
   // Provider does not support tools (LLM7) — prose-only path
   try {
     const result = streamText({
-      model,
+      model: getLlm7TextModel(),
       system: NO_TOOLS_SYSTEM_PROMPT,
       messages: modelMessages,
       maxOutputTokens: 4096,

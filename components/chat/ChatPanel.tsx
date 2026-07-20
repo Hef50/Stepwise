@@ -80,6 +80,8 @@ interface ChatPanelProps {
   typingHoldMs?: number;
   /** Chat reveal speed (cps) — controlled by the whiteboard settings overlay. */
   textSpeed?: number;
+  /** Mixed mode adds browser speech around the same chat and whiteboard flow. */
+  interactionMode?: "text" | "mixed";
 }
 
 function isRateLimitError(error: Error | null | undefined): boolean {
@@ -176,6 +178,7 @@ export function ChatPanel({
   forceLlm7Fail = false,
   typingHoldMs = 0,
   textSpeed = DEFAULT_CPS,
+  interactionMode = "text",
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<UploadedFile[]>([]);
@@ -185,7 +188,12 @@ export function ChatPanel({
   const [manuallyDowngraded, setManuallyDowngraded] = useState(false);
   const [materialsOpen, setMaterialsOpen] = useState(false);
   const [isCatchingUpReveal, setIsCatchingUpReveal] = useState(false);
-  const voice = useVoiceTA();
+  const submitMixedRef = useRef<(text: string) => void>(() => {});
+  const voice = useVoiceTA((transcript) => {
+    if (interactionMode !== "mixed") return;
+    setInput(transcript);
+    submitMixedRef.current(transcript);
+  });
   const { loadMessages, saveMessages, clearSession } = useChatPersistence();
   const courseMaterials = useCourseMaterials();
 
@@ -212,11 +220,14 @@ export function ChatPanel({
     () => new Set()
   );
   const renderLatexRef = useRef(renderLatexOnCanvas);
-  renderLatexRef.current = renderLatexOnCanvas;
   const renderTextRef = useRef(renderTextOnCanvas);
-  renderTextRef.current = renderTextOnCanvas;
   const renderDiagramRef = useRef(renderDiagramOnCanvas);
-  renderDiagramRef.current = renderDiagramOnCanvas;
+
+  useEffect(() => {
+    renderLatexRef.current = renderLatexOnCanvas;
+    renderTextRef.current = renderTextOnCanvas;
+    renderDiagramRef.current = renderDiagramOnCanvas;
+  }, [renderLatexOnCanvas, renderTextOnCanvas, renderDiagramOnCanvas]);
 
   const markEquationReady = useCallback((latex: string) => {
     const key = latex.trim();
@@ -364,13 +375,16 @@ export function ChatPanel({
 
   // Keep stable refs for useChat.onToolCall (may capture an early closure)
   const enqueueLatexDrawRef = useRef(enqueueLatexDraw);
-  enqueueLatexDrawRef.current = enqueueLatexDraw;
   const enqueueTextDrawRef = useRef(enqueueTextDraw);
-  enqueueTextDrawRef.current = enqueueTextDraw;
   const enqueueDiagramDrawRef = useRef(enqueueDiagramDraw);
-  enqueueDiagramDrawRef.current = enqueueDiagramDraw;
   const processDrawQueueRef = useRef(processDrawQueue);
-  processDrawQueueRef.current = processDrawQueue;
+
+  useEffect(() => {
+    enqueueLatexDrawRef.current = enqueueLatexDraw;
+    enqueueTextDrawRef.current = enqueueTextDraw;
+    enqueueDiagramDrawRef.current = enqueueDiagramDraw;
+    processDrawQueueRef.current = processDrawQueue;
+  }, [enqueueLatexDraw, enqueueTextDraw, enqueueDiagramDraw, processDrawQueue]);
 
   const provider: ChatProvider = escalated ? "gemma" : "llm7";
 
@@ -602,10 +616,9 @@ export function ChatPanel({
     [focusLatexShape]
   );
 
-  const handleSubmit = useCallback(
-    async (e: FormEvent<HTMLFormElement>) => {
-      e.preventDefault();
-      const trimmed = input.trim();
+  const submitText = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
       if (!trimmed || isLoading) return;
 
       const imageFiles = files.filter((f) => f.type.startsWith("image/"));
@@ -656,7 +669,6 @@ export function ChatPanel({
       setFiles([]);
     },
     [
-      input,
       files,
       isLoading,
       escalated,
@@ -666,6 +678,18 @@ export function ChatPanel({
       forceLlm7Fail,
     ]
   );
+
+  const handleSubmit = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      void submitText(input);
+    },
+    [input, submitText]
+  );
+
+  useEffect(() => {
+    submitMixedRef.current = (text) => void submitText(text);
+  }, [submitText]);
 
   const handleCaptureWhiteboard = useCallback(async () => {
     const payload = await captureWhiteboard();
@@ -757,6 +781,28 @@ export function ChatPanel({
       .filter((p) => p.type === "text")
       .map((p) => (p.type === "text" ? p.text : ""))
       .join("") ?? undefined;
+
+  const { enqueueSpeech, cancelSpeech } = voice;
+  const lastSpokenMessageRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (
+      interactionMode !== "mixed" ||
+      !lastAssistantMsg?.id ||
+      !lastAssistantText ||
+      isAwaitingChatResponse ||
+      !voice.state.soundEnabled ||
+      lastSpokenMessageRef.current === lastAssistantMsg.id
+    ) {
+      return;
+    }
+    lastSpokenMessageRef.current = lastAssistantMsg.id;
+    enqueueSpeech(lastAssistantText);
+  }, [enqueueSpeech, interactionMode, isAwaitingChatResponse, lastAssistantMsg?.id, lastAssistantText, voice.state.soundEnabled]);
+
+  useEffect(() => {
+    if (interactionMode === "mixed") return;
+    cancelSpeech();
+  }, [cancelSpeech, interactionMode]);
 
   return (
     <TooltipProvider>

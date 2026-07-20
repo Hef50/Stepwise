@@ -1,6 +1,7 @@
 // ─── App Mode ────────────────────────────────────────────────────────────────
 
-export type AppMode = "text" | "voice";
+/** Text chat, browser-assisted text chat, or a Gemini Live call. */
+export type AppMode = "text" | "mixed" | "audio";
 
 export type ChatProvider = "llm7" | "gemma";
 
@@ -189,7 +190,13 @@ export interface VoiceState {
   mode: VoiceMode;
   transcript: string;
   error: string | null;
+  /** @deprecated Prefer the individual capability flags. */
   supported: boolean;
+  sttSupported: boolean;
+  ttsSupported: boolean;
+  soundEnabled: boolean;
+  voiceSpeed: number;
+  ttsStatus: string | null;
 }
 
 export interface VoiceControls {
@@ -197,7 +204,11 @@ export interface VoiceControls {
   startListening: () => void;
   stopListening: () => void;
   speak: (text: string) => void;
+  preloadSpeech: (text: string) => void;
+  enqueueSpeech: (text: string) => void;
   cancelSpeech: () => void;
+  toggleSound: () => void;
+  setVoiceSpeed: (speed: number) => void;
 }
 
 // ─── Diagram Blocks ───────────────────────────────────────────────────────────

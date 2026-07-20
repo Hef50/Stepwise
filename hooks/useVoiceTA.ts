@@ -1,240 +1,212 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { loadVoiceSettings, saveVoiceSettings } from "@/lib/settings";
+import { stripMarkdownForSpeech } from "@/lib/speech";
 import type { VoiceControls, VoiceState } from "@/lib/types";
 
-/**
- * useVoiceTA — Provider-agnostic voice hook.
- *
- * Internally uses the native Web Speech API (SpeechRecognition + speechSynthesis).
- * The public interface (VoiceControls) is deliberately abstract so this
- * implementation can be replaced with OpenAI Whisper/TTS without touching any
- * component that consumes it.
- *
- * Swap point:
- *   1. Create a new hook file (e.g. useVoiceOpenAI.ts) that returns VoiceControls.
- *   2. Replace the import in ChatPanel.tsx from useVoiceTA -> useVoiceOpenAI.
- *   3. No other changes required.
- */
-
 const isBrowser = typeof window !== "undefined";
+type RecognitionResult = { isFinal: boolean; 0: { transcript: string } };
+type RecognitionEvent = { resultIndex: number; results: ArrayLike<RecognitionResult> };
+type RecognitionInstance = {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  maxAlternatives: number;
+  onstart: (() => void) | null;
+  onresult: ((event: RecognitionEvent) => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+type SpeechRecognitionConstructor = new () => RecognitionInstance;
 
-type SpeechRecognitionConstructor = new () => SpeechRecognition;
-
-function getSpeechRecognitionClass(): SpeechRecognitionConstructor | undefined {
+function getRecognition(): SpeechRecognitionConstructor | undefined {
   if (!isBrowser) return undefined;
-  const w = window as Window & {
+  const browser = window as Window & {
     SpeechRecognition?: SpeechRecognitionConstructor;
     webkitSpeechRecognition?: SpeechRecognitionConstructor;
   };
-  return w.SpeechRecognition ?? w.webkitSpeechRecognition;
+  return browser.SpeechRecognition ?? browser.webkitSpeechRecognition;
 }
 
-function isSpeechSynthesisSupported(): boolean {
+function hasTts() {
   return isBrowser && "speechSynthesis" in window;
 }
 
-export function useVoiceTA(): VoiceControls {
-  // Always start with supported: false so server and client render the same
-  // initial HTML. The real capability check runs in useEffect (client-only).
-  const [state, setState] = useState<VoiceState>({
+function initialState(): VoiceState {
+  return {
     mode: "idle",
     transcript: "",
     error: null,
     supported: false,
-  });
+    sttSupported: false,
+    ttsSupported: false,
+    soundEnabled: true,
+    voiceSpeed: 1,
+    ttsStatus: null,
+  };
+}
 
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  // Ref holds the accumulated final transcript so onend can emit it atomically
-  // without depending on React state timing.
-  const finalTranscriptRef = useRef<string>("");
-  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+/** Browser STT/TTS adapter used by Text and Mixed modes. */
+export function useVoiceTA(onTranscriptReady?: (text: string) => void): VoiceControls {
+  const [state, setState] = useState<VoiceState>(initialState);
+  const recognitionRef = useRef<RecognitionInstance | null>(null);
+  const finalTranscriptRef = useRef("");
+  const soundEnabledRef = useRef(true);
+  const speedRef = useRef(1);
+  const queueRef = useRef<string[]>([]);
+  const speakingRef = useRef(false);
+  const transcriptCallbackRef = useRef(onTranscriptReady);
 
-  // Detect browser support after mount to avoid SSR/hydration mismatch
   useEffect(() => {
-    const supported =
-      getSpeechRecognitionClass() !== undefined && isSpeechSynthesisSupported();
-    setState((prev) => ({ ...prev, supported }));
-  }, []);
+    transcriptCallbackRef.current = onTranscriptReady;
+  }, [onTranscriptReady]);
 
-  // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      recognitionRef.current?.abort();
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
-    };
-  }, []);
-
-  const startListening = useCallback(() => {
-    const SpeechRecognitionClass = getSpeechRecognitionClass();
-    if (!SpeechRecognitionClass) {
-      setState((prev) => ({
-        ...prev,
-        mode: "error",
-        error: "Speech recognition is not supported in this browser.",
-      }));
-      return;
-    }
-
-    // Abort any existing recognition session cleanly
-    if (recognitionRef.current) {
-      recognitionRef.current.onend = null;
-      recognitionRef.current.abort();
-      recognitionRef.current = null;
-    }
-
-    // Cancel any in-progress TTS
-    if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
-
-    finalTranscriptRef.current = "";
-
-    try {
-      const recognition = new SpeechRecognitionClass();
-      recognition.lang = "en-US";
-      recognition.interimResults = true;
-      recognition.maxAlternatives = 1;
-      recognition.continuous = false;
-
-      recognition.onstart = () => {
-        setState({
-          mode: "listening",
-          transcript: "",
-          error: null,
-          supported: true,
-        });
-      };
-
-      recognition.onresult = (event: SpeechRecognitionEvent) => {
-        // Accumulate all final results in the ref; build a live combined string
-        // (finals already captured + current interim) for real-time display.
-        let interimTranscript = "";
-
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const result = event.results[i];
-          if (result.isFinal) {
-            finalTranscriptRef.current += result[0].transcript;
-          } else {
-            interimTranscript += result[0].transcript;
-          }
-        }
-
-        const liveTranscript = finalTranscriptRef.current + interimTranscript;
-        setState((prev) => ({ ...prev, transcript: liveTranscript }));
-      };
-
-      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-        // "aborted" fires when we deliberately stop — not a real error.
-        if (event.error === "aborted") return;
-
-        const errorMessage =
-          event.error === "no-speech"
-            ? "No speech detected. Please try again."
-            : event.error === "audio-capture"
-            ? "Microphone not found. Check your browser permissions."
-            : event.error === "not-allowed"
-            ? "Microphone access denied. Allow access in your browser settings."
-            : event.error === "network"
-            ? "Speech service unavailable. Check your internet connection and try again."
-            : `Speech recognition error: ${event.error}`;
-
-        setState((prev) => ({ ...prev, mode: "error", error: errorMessage }));
-
-        // Auto-clear error after 4 seconds so the UI doesn't stay stuck
-        if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-        errorTimerRef.current = setTimeout(() => {
-          setState((prev) =>
-            prev.mode === "error" ? { ...prev, mode: "idle", error: null } : prev
-          );
-        }, 4000);
-      };
-
-      recognition.onend = () => {
-        // Emit mode AND final transcript atomically in a single setState so
-        // there is no render where mode is "idle" but transcript is still "".
-        setState((prev) => ({
-          ...prev,
-          mode: "idle",
-          transcript: finalTranscriptRef.current || prev.transcript,
-        }));
-        recognitionRef.current = null;
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-    } catch (err) {
-      setState((prev) => ({
-        ...prev,
-        mode: "error",
-        error:
-          err instanceof Error
-            ? err.message
-            : "Failed to start speech recognition.",
-      }));
-    }
-  }, []);
-
-  const stopListening = useCallback(() => {
-    if (recognitionRef.current) {
-      // .stop() triggers onend which will update state
-      recognitionRef.current.stop();
-    }
-  }, []);
-
-  const speak = useCallback((text: string) => {
-    if (!isSpeechSynthesisSupported()) {
-      setState((prev) => ({
-        ...prev,
-        mode: "error",
-        error: "Speech synthesis is not supported in this browser.",
-      }));
-      return;
-    }
-
-    // Stop recognition and any in-progress speech
-    if (recognitionRef.current) {
-      recognitionRef.current.onend = null;
-      recognitionRef.current.abort();
-      recognitionRef.current = null;
-    }
-    window.speechSynthesis.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "en-US";
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
-
-    utterance.onstart = () => {
-      setState((prev) => ({ ...prev, mode: "speaking", error: null }));
-    };
-
-    utterance.onend = () => {
-      setState((prev) => ({ ...prev, mode: "idle" }));
-    };
-
-    utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
-      if (event.error === "interrupted" || event.error === "canceled") {
-        setState((prev) => ({ ...prev, mode: "idle" }));
-        return;
-      }
-      setState((prev) => ({
-        ...prev,
-        mode: "error",
-        error: `Speech synthesis error: ${event.error}`,
-      }));
-    };
-
-    utteranceRef.current = utterance;
-    window.speechSynthesis.speak(utterance);
+    const sttSupported = Boolean(getRecognition());
+    const ttsSupported = hasTts();
+    const settings = loadVoiceSettings();
+    soundEnabledRef.current = settings.ttsEnabled;
+    speedRef.current = settings.talkingSpeed;
+    setState((previous) => ({
+      ...previous,
+      supported: sttSupported || ttsSupported,
+      sttSupported,
+      ttsSupported,
+      soundEnabled: settings.ttsEnabled,
+      voiceSpeed: settings.talkingSpeed,
+    }));
   }, []);
 
   const cancelSpeech = useCallback(() => {
-    if (isSpeechSynthesisSupported()) window.speechSynthesis.cancel();
-    utteranceRef.current = null;
-    setState((prev) => ({ ...prev, mode: "idle" }));
+    queueRef.current = [];
+    speakingRef.current = false;
+    if (hasTts()) window.speechSynthesis.cancel();
+    setState((previous) =>
+      previous.mode === "speaking" ? { ...previous, mode: "idle", ttsStatus: null } : previous
+    );
   }, []);
 
-  return { state, startListening, stopListening, speak, cancelSpeech };
+  const speakNext = useCallback(() => {
+    if (!hasTts() || !soundEnabledRef.current || speakingRef.current) return;
+    const next = queueRef.current.shift();
+    if (!next) return;
+
+    speakingRef.current = true;
+    const utterance = new SpeechSynthesisUtterance(stripMarkdownForSpeech(next));
+    utterance.lang = "en-US";
+    utterance.rate = speedRef.current;
+    utterance.onstart = () =>
+      setState((previous) => ({ ...previous, mode: "speaking", error: null, ttsStatus: "Speaking" }));
+    utterance.onend = () => {
+      speakingRef.current = false;
+      setState((previous) => ({ ...previous, mode: "idle", ttsStatus: null }));
+      speakNext();
+    };
+    utterance.onerror = (event) => {
+      speakingRef.current = false;
+      if (event.error === "interrupted" || event.error === "canceled") {
+        setState((previous) => ({ ...previous, mode: "idle", ttsStatus: null }));
+      } else {
+        setState((previous) => ({ ...previous, mode: "error", error: `Speech synthesis error: ${event.error}`, ttsStatus: null }));
+      }
+    };
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  const enqueueSpeech = useCallback(
+    (text: string) => {
+      if (!text.trim() || !soundEnabledRef.current) return;
+      queueRef.current.push(text);
+      speakNext();
+    },
+    [speakNext]
+  );
+
+  const speak = useCallback(
+    (text: string) => {
+      if (!hasTts()) {
+        setState((previous) => ({ ...previous, mode: "error", error: "Speech synthesis is not supported in this browser." }));
+        return;
+      }
+      if (!soundEnabledRef.current) {
+        soundEnabledRef.current = true;
+        saveVoiceSettings({ ttsEnabled: true });
+        setState((previous) => ({ ...previous, soundEnabled: true }));
+      }
+      cancelSpeech();
+      queueRef.current = [text];
+      speakNext();
+    },
+    [cancelSpeech, speakNext]
+  );
+
+  const startListening = useCallback(() => {
+    const Recognition = getRecognition();
+    if (!Recognition) {
+      setState((previous) => ({ ...previous, mode: "error", error: "Speech recognition is not supported in this browser." }));
+      return;
+    }
+    cancelSpeech();
+    recognitionRef.current?.abort();
+    finalTranscriptRef.current = "";
+    const recognition = new Recognition();
+    recognition.lang = "en-US";
+    recognition.interimResults = true;
+    recognition.continuous = false;
+    recognition.maxAlternatives = 1;
+    recognition.onstart = () => setState((previous) => ({ ...previous, mode: "listening", transcript: "", error: null }));
+    recognition.onresult = (event: RecognitionEvent) => {
+      let interim = "";
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        if (result.isFinal) finalTranscriptRef.current += `${result[0].transcript} `;
+        else interim += result[0].transcript;
+      }
+      setState((previous) => ({ ...previous, transcript: `${finalTranscriptRef.current}${interim}`.trim() }));
+    };
+    recognition.onerror = (event: { error: string }) => {
+      if (event.error === "aborted") return;
+      setState((previous) => ({ ...previous, mode: "error", error: `Speech recognition error: ${event.error}` }));
+    };
+    recognition.onend = () => {
+      const transcript = finalTranscriptRef.current.trim();
+      recognitionRef.current = null;
+      setState((previous) => ({ ...previous, mode: "idle", transcript: transcript || previous.transcript }));
+      if (transcript) transcriptCallbackRef.current?.(transcript);
+    };
+    recognitionRef.current = recognition;
+    try {
+      recognition.start();
+    } catch (error) {
+      setState((previous) => ({ ...previous, mode: "error", error: error instanceof Error ? error.message : "Could not start speech recognition." }));
+    }
+  }, [cancelSpeech]);
+
+  const stopListening = useCallback(() => recognitionRef.current?.stop(), []);
+
+  const toggleSound = useCallback(() => {
+    const enabled = !soundEnabledRef.current;
+    soundEnabledRef.current = enabled;
+    saveVoiceSettings({ ttsEnabled: enabled });
+    if (!enabled) cancelSpeech();
+    setState((previous) => ({ ...previous, soundEnabled: enabled, ttsStatus: enabled ? null : "Muted" }));
+  }, [cancelSpeech]);
+
+  const setVoiceSpeed = useCallback((speed: number) => {
+    const next = Math.min(2, Math.max(0.5, speed));
+    speedRef.current = next;
+    saveVoiceSettings({ talkingSpeed: next });
+    setState((previous) => ({ ...previous, voiceSpeed: next }));
+  }, []);
+
+  useEffect(() => () => {
+    recognitionRef.current?.abort();
+    if (hasTts()) window.speechSynthesis.cancel();
+  }, []);
+
+  return { state, startListening, stopListening, speak, preloadSpeech: () => { if (hasTts()) window.speechSynthesis.getVoices(); }, enqueueSpeech, cancelSpeech, toggleSound, setVoiceSpeed };
 }

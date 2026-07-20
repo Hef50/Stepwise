@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { Mic, MicOff, PhoneCall, PhoneOff, Radio, Volume2 } from "lucide-react";
+import { Camera, Mic, MicOff, PhoneCall, PhoneOff, Radio, Volume2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -9,14 +9,21 @@ import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { useGeminiLive } from "@/hooks/useGeminiLive";
 import { cn } from "@/lib/utils";
 import type { CanvasPayload } from "@/lib/types";
+import type { DiagramSpec } from "@/lib/whiteboard/diagramSpec";
 
 interface LiveTutorPanelProps {
   captureWhiteboard: () => Promise<CanvasPayload | null>;
+  renderLatexOnCanvas?: (latex: string, displayMode?: boolean) => Promise<string | null>;
+  renderTextOnCanvas?: (text: string) => Promise<string | null>;
+  renderDiagramOnCanvas?: (spec: DiagramSpec | string) => Promise<string | null>;
 }
 
-function LiveTutorPanelInner({ captureWhiteboard }: LiveTutorPanelProps) {
-  const { status, transcript, error, connect, disconnect } = useGeminiLive({
+function LiveTutorPanelInner({ captureWhiteboard, renderLatexOnCanvas, renderTextOnCanvas, renderDiagramOnCanvas }: LiveTutorPanelProps) {
+  const { status, muted, transcript, error, connect, disconnect, toggleMute, refreshWhiteboard } = useGeminiLive({
     captureWhiteboard,
+    renderLatexOnCanvas,
+    renderTextOnCanvas,
+    renderDiagramOnCanvas,
   });
 
   const transcriptBottomRef = useRef<HTMLDivElement>(null);
@@ -129,6 +136,24 @@ function LiveTutorPanelInner({ captureWhiteboard }: LiveTutorPanelProps) {
         {isActive || isSpeaking ? (
           <>
             <p className="text-xs text-muted-foreground">Session active — speak to ask your tutor</p>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-[40px] gap-2"
+              onClick={() => void refreshWhiteboard()}
+            >
+              <Camera className="h-4 w-4" />
+              Refresh whiteboard
+            </Button>
+            <Button
+              type="button"
+              variant={muted ? "destructive" : "outline"}
+              className="min-h-[40px] gap-2"
+              onClick={() => void toggleMute()}
+            >
+              {muted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+              {muted ? "Unmute" : "Mute"}
+            </Button>
             <Button
               type="button"
               variant="destructive"

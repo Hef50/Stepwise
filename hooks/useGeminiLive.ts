@@ -6,6 +6,7 @@ import type { Session, LiveServerMessage } from "@google/genai";
 import { GEMINI_LIVE_MODEL } from "@/lib/ai/gemini";
 import type { CanvasPayload, LiveStatus, LiveTranscriptLine } from "@/lib/types";
 import type { LiveTokenResponse } from "@/app/api/live/token/route";
+import { parseDiagramSpec, type DiagramSpec } from "@/lib/whiteboard/diagramSpec";
 
 const LIVE_OUTPUT_SAMPLE_RATE = 24000;
 /** Whiteboard frame interval in milliseconds (~1 FPS) */
@@ -15,15 +16,41 @@ const FRAME_INTERVAL_SLOW_MS = 2000;
 
 export interface UseGeminiLiveOptions {
   captureWhiteboard: () => Promise<CanvasPayload | null>;
+  renderLatexOnCanvas?: (latex: string, displayMode?: boolean) => Promise<string | null>;
+  renderTextOnCanvas?: (text: string) => Promise<string | null>;
+  renderDiagramOnCanvas?: (spec: DiagramSpec | string) => Promise<string | null>;
 }
 
 export interface UseGeminiLiveReturn {
   status: LiveStatus;
+  muted: boolean;
   transcript: LiveTranscriptLine[];
   error: string | null;
   connect: () => Promise<void>;
   disconnect: () => void;
+  toggleMute: () => Promise<void>;
+  refreshWhiteboard: () => Promise<boolean>;
 }
+
+const LIVE_WHITEBOARD_TOOLS = [{
+  functionDeclarations: [
+    {
+      name: "render_math_whiteboard",
+      description: "Draw a mathematical equation or formula on the shared whiteboard. Call this whenever the student explicitly asks you to draw, write, or put an equation on the whiteboard, and whenever a displayed equation would materially help the explanation.",
+      parametersJsonSchema: { type: "object", additionalProperties: false, properties: { latex: { type: "string", description: "Valid LaTeX without dollar delimiters." }, displayMode: { type: "boolean" } }, required: ["latex"] },
+    },
+    {
+      name: "render_text_whiteboard",
+      description: "Draw a short handwritten label or title on the shared whiteboard. Use only for short phrases, never paragraphs.",
+      parametersJsonSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", description: "A short label of at most six words." } }, required: ["text"] },
+    },
+    {
+      name: "render_diagram_whiteboard",
+      description: "Draw a diagram on the shared whiteboard. Use when the student explicitly asks to draw a diagram or a diagram materially improves the explanation. specJson must be valid JSON for a DiagramSpec.",
+      parametersJsonSchema: { type: "object", additionalProperties: false, properties: { specJson: { type: "string" } }, required: ["specJson"] },
+    },
+  ],
+}];
 
 function base64ToArrayBuffer(base64: string): ArrayBuffer {
   const binary = atob(base64);
@@ -45,8 +72,12 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 
 export function useGeminiLive({
   captureWhiteboard,
+  renderLatexOnCanvas,
+  renderTextOnCanvas,
+  renderDiagramOnCanvas,
 }: UseGeminiLiveOptions): UseGeminiLiveReturn {
   const [status, setStatus] = useState<LiveStatus>("idle");
+  const [muted, setMuted] = useState(false);
   const [transcript, setTranscript] = useState<LiveTranscriptLine[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,6 +92,16 @@ export function useGeminiLive({
   const isSpeakingRef = useRef<boolean>(false);
   /** Last turn ended slow — throttle whiteboard frames */
   const slowResponseRef = useRef<boolean>(false);
+  const renderLatexRef = useRef(renderLatexOnCanvas);
+  const renderTextRef = useRef(renderTextOnCanvas);
+  const renderDiagramRef = useRef(renderDiagramOnCanvas);
+  const executeToolCallsRef = useRef<(message: LiveServerMessage) => Promise<void>>(async () => {});
+
+  useEffect(() => {
+    renderLatexRef.current = renderLatexOnCanvas;
+    renderTextRef.current = renderTextOnCanvas;
+    renderDiagramRef.current = renderDiagramOnCanvas;
+  }, [renderLatexOnCanvas, renderTextOnCanvas, renderDiagramOnCanvas]);
 
   // ── Transcript helpers ────────────────────────────────────────────────────
 
@@ -132,6 +173,8 @@ export function useGeminiLive({
     (msg: LiveServerMessage) => {
       const sc = msg.serverContent;
 
+      if (msg.toolCall) void executeToolCallsRef.current(msg);
+
       // Audio output — use the convenience `data` getter
       if (msg.data) {
         playAudioChunk(msg.data);
@@ -201,6 +244,36 @@ export function useGeminiLive({
     workletNode.connect(ctx.destination);
   }, []);
 
+  const stopMic = useCallback(() => {
+    workletNodeRef.current?.disconnect();
+    workletNodeRef.current = null;
+    micStreamRef.current?.getTracks().forEach((track) => track.stop());
+    micStreamRef.current = null;
+    try {
+      sessionRef.current?.sendRealtimeInput({ audioStreamEnd: true });
+    } catch {
+      // A closing socket cannot accept the stream-end message.
+    }
+  }, []);
+
+  const toggleMute = useCallback(async () => {
+    if (!sessionRef.current) return;
+    if (micStreamRef.current) {
+      stopMic();
+      setMuted(true);
+      return;
+    }
+    const context = audioCtxRef.current;
+    if (!context) return;
+    try {
+      await startMic(context);
+      setMuted(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not restart the microphone.");
+      setMuted(true);
+    }
+  }, [startMic, stopMic]);
+
   // ── Whiteboard frame streaming ────────────────────────────────────────────
 
   const startFrameStream = useCallback(() => {
@@ -225,6 +298,60 @@ export function useGeminiLive({
     frameIntervalRef.current = setInterval(() => void sendFrame(), interval);
   }, [captureWhiteboard]);
 
+  const refreshWhiteboard = useCallback(async (): Promise<boolean> => {
+    const session = sessionRef.current;
+    if (!session) return false;
+    const payload = await captureWhiteboard().catch(() => null);
+    if (!payload?.imageDataUrl) return false;
+    session.sendRealtimeInput({
+      video: {
+        data: payload.imageDataUrl.replace(/^data:image\/\w+;base64,/, ""),
+        mimeType: "image/jpeg",
+      },
+    });
+    return true;
+  }, [captureWhiteboard]);
+
+  const executeToolCalls = useCallback(async (message: LiveServerMessage) => {
+    const calls = message.toolCall?.functionCalls ?? [];
+    if (calls.length === 0 || !sessionRef.current) return;
+
+    const functionResponses = await Promise.all(calls.map(async (call) => {
+      const name = call.name ?? "unknown";
+      const args = call.args ?? {};
+      try {
+        let shapeId: string | null = null;
+        if (name === "render_math_whiteboard") {
+          const latex = typeof args.latex === "string" ? args.latex.trim() : "";
+          if (!latex || !renderLatexRef.current) throw new Error("LaTeX renderer is unavailable.");
+          shapeId = await renderLatexRef.current(latex, args.displayMode !== false);
+        } else if (name === "render_text_whiteboard") {
+          const text = typeof args.text === "string" ? args.text.trim() : "";
+          if (!text || !renderTextRef.current) throw new Error("Text renderer is unavailable.");
+          shapeId = await renderTextRef.current(text);
+        } else if (name === "render_diagram_whiteboard") {
+          const raw = typeof args.specJson === "string" ? args.specJson : "";
+          if (!raw || !renderDiagramRef.current) throw new Error("Diagram renderer is unavailable.");
+          const spec = parseDiagramSpec(JSON.parse(raw));
+          if (!spec) throw new Error("The diagram specification was invalid.");
+          shapeId = await renderDiagramRef.current(spec);
+        } else {
+          throw new Error(`Unknown whiteboard tool: ${name}`);
+        }
+        if (!shapeId) throw new Error("The whiteboard could not create that shape.");
+        await refreshWhiteboard();
+        return { id: call.id, name, response: { output: { rendered: true, shapeId } } };
+      } catch (error) {
+        return { id: call.id, name, response: { error: error instanceof Error ? error.message : "Whiteboard rendering failed." } };
+      }
+    }));
+    sessionRef.current?.sendToolResponse({ functionResponses });
+  }, [refreshWhiteboard]);
+
+  useEffect(() => {
+    executeToolCallsRef.current = executeToolCalls;
+  }, [executeToolCalls]);
+
   // ── Cleanup ───────────────────────────────────────────────────────────────
 
   const cleanup = useCallback(() => {
@@ -232,15 +359,8 @@ export function useGeminiLive({
       clearInterval(frameIntervalRef.current);
       frameIntervalRef.current = null;
     }
-    if (workletNodeRef.current) {
-      workletNodeRef.current.port.onmessage = null;
-      workletNodeRef.current.disconnect();
-      workletNodeRef.current = null;
-    }
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((t) => t.stop());
-      micStreamRef.current = null;
-    }
+    if (workletNodeRef.current) workletNodeRef.current.port.onmessage = null;
+    stopMic();
     if (audioCtxRef.current) {
       void audioCtxRef.current.close();
       audioCtxRef.current = null;
@@ -252,7 +372,7 @@ export function useGeminiLive({
     isSpeakingRef.current = false;
     nextPlayTimeRef.current = 0;
     slowResponseRef.current = false;
-  }, []);
+  }, [stopMic]);
 
   // ── Connect ───────────────────────────────────────────────────────────────
 
@@ -260,6 +380,7 @@ export function useGeminiLive({
     if (status !== "idle" && status !== "error") return;
     setError(null);
     setTranscript([]);
+    setMuted(false);
     setStatus("connecting");
 
     try {
@@ -287,6 +408,7 @@ export function useGeminiLive({
           responseModalities: [Modality.AUDIO],
           outputAudioTranscription: {},
           inputAudioTranscription: {},
+          tools: LIVE_WHITEBOARD_TOOLS,
         },
         callbacks: {
           onopen: () => {
@@ -335,5 +457,5 @@ export function useGeminiLive({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally run cleanup only on unmount
 
-  return { status, transcript, error, connect, disconnect };
+  return { status, muted, transcript, error, connect, disconnect, toggleMute, refreshWhiteboard };
 }

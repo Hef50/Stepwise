@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import type { Editor } from "@tldraw/tldraw";
-import { MessageSquare, PenTool, Mic } from "lucide-react";
+import { MessageSquare, PenTool, Mic, Headphones } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { WhiteboardPanel } from "@/components/whiteboard/WhiteboardPanel";
 import { WhiteboardSettingsPanel } from "@/components/chat/WhiteboardSettingsPanel";
@@ -138,10 +138,12 @@ export function AppShell() {
   // Restore persisted mode after hydration (client-only, avoids SSR mismatch)
   useEffect(() => {
     try {
-      const stored = window.localStorage.getItem(MODE_STORAGE_KEY) as AppMode | null;
-      if (stored === "text" || stored === "voice") {
+      const stored = window.localStorage.getItem(MODE_STORAGE_KEY);
+      const restored = stored === "voice" ? "audio" : stored;
+      if (restored === "text" || restored === "mixed" || restored === "audio") {
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        setMode(stored);
+        setMode(restored);
+        window.localStorage.setItem(MODE_STORAGE_KEY, restored);
       }
     } catch {
       // localStorage unavailable — use default
@@ -156,8 +158,8 @@ export function AppShell() {
     } catch {
       // ignore
     }
-    // Voice mode always shows Gemini Live as the active model
-    if (next === "voice") {
+    // Audio mode always shows Gemini Live as the active model.
+    if (next === "audio") {
       setActiveModel("gemini-live");
     } else {
       setActiveModel("llm7");
@@ -216,8 +218,13 @@ export function AppShell() {
   }, []);
 
   const chatPanelContent =
-    mode === "voice" ? (
-      <LiveTutorPanel captureWhiteboard={capture} />
+    mode === "audio" ? (
+      <LiveTutorPanel
+        captureWhiteboard={capture}
+        renderLatexOnCanvas={renderLatex}
+        renderTextOnCanvas={renderText}
+        renderDiagramOnCanvas={renderDiagram}
+      />
     ) : (
       <ChatPanel
         captureWhiteboard={capture}
@@ -232,6 +239,7 @@ export function AppShell() {
         forceLlm7Fail={forceLlm7Fail}
         typingHoldMs={devMode ? typingHoldMs : 0}
         textSpeed={speeds.chat}
+        interactionMode={mode}
       />
     );
 
@@ -252,16 +260,29 @@ export function AppShell() {
       </button>
       <button
         type="button"
-        onClick={() => handleModeChange("voice")}
+        onClick={() => handleModeChange("mixed")}
         className={`flex min-h-[36px] items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-          mode === "voice"
+          mode === "mixed"
             ? "bg-background text-foreground shadow-sm"
             : "text-muted-foreground hover:text-foreground"
         }`}
-        aria-pressed={mode === "voice"}
+        aria-pressed={mode === "mixed"}
+      >
+        <Headphones className="h-3.5 w-3.5" />
+        Mixed
+      </button>
+      <button
+        type="button"
+        onClick={() => handleModeChange("audio")}
+        className={`flex min-h-[36px] items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+          mode === "audio"
+            ? "bg-background text-foreground shadow-sm"
+            : "text-muted-foreground hover:text-foreground"
+        }`}
+        aria-pressed={mode === "audio"}
       >
         <Mic className="h-3.5 w-3.5" />
-        Live
+        Audio
       </button>
     </div>
   );
@@ -341,12 +362,12 @@ export function AppShell() {
           <div className="flex-shrink-0 border-b border-border px-3 py-2">
             <TabsList className="w-full">
               <TabsTrigger value="chat" className="flex-1 gap-2">
-                {mode === "voice" ? (
+                {mode === "audio" ? (
                   <Mic className="h-4 w-4" />
                 ) : (
                   <MessageSquare className="h-4 w-4" />
                 )}
-                {mode === "voice" ? "Live" : "Chat"}
+                {mode === "audio" ? "Audio" : mode === "mixed" ? "Mixed" : "Chat"}
               </TabsTrigger>
               <TabsTrigger value="board" className="flex-1 gap-2">
                 <PenTool className="h-4 w-4" />

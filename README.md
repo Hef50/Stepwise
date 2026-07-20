@@ -10,12 +10,18 @@ A responsive AI tutoring web app with a streaming chat interface, interactive tl
 - Status badge shows active model: **LLM7** / **Gemma 4**
 - Mermaid & Schemdraw diagram rendering; PDF text extraction; file uploads
 
-### Live Mode ("Office Hours")
+### Mixed Mode
+- Uses the same chat, Gemma vision escalation, PDF materials, and animated whiteboard rendering as Text mode
+- Browser speech recognition can submit a question hands-free
+- Browser text-to-speech can read the finished answer aloud; mute and speed preferences persist locally
+
+### Audio Mode ("Office Hours")
 - Real-time **voice tutoring** via Gemini 3 Flash Live API
 - Native audio input (mic PCM 16kHz via AudioWorklet) + audio output (PCM 24kHz)
 - Whiteboard streamed to the tutor at ~1 FPS so Gemini can see what you draw
 - On-screen transcription of both student and tutor speech
 - Status badge shows **Gemini 3 Live**
+- Gemini can automatically render equations, short labels, and diagrams on the shared whiteboard during the call. When the student explicitly asks it to draw or write on the whiteboard, it is instructed to use the matching drawing tool.
 
 ## Features
 
