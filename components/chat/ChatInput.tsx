@@ -27,6 +27,8 @@ interface ChatInputProps {
   /** Number of enabled course materials — shown as a badge on the library button. */
   courseMaterialsActiveCount?: number;
   lastAssistantMessage?: string;
+  /** Mixed mode exposes browser speech controls; Text mode remains keyboard-only. */
+  showVoiceControls?: boolean;
 }
 
 export function ChatInput({
@@ -42,9 +44,12 @@ export function ChatInput({
   onOpenCourseMaterials,
   courseMaterialsActiveCount = 0,
   lastAssistantMessage,
+  showVoiceControls = false,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const wasListeningRef = useRef(false);
+  const voiceMode = voice.state.mode;
+  const voiceTranscript = voice.state.transcript;
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -54,20 +59,19 @@ export function ChatInput({
   }, [value]);
 
   useEffect(() => {
-    const { mode, transcript } = voice.state;
-
-    if (mode === "listening") {
+    if (!showVoiceControls) return;
+    if (voiceMode === "listening") {
       wasListeningRef.current = true;
     }
 
-    if (mode === "idle" && wasListeningRef.current) {
+    if (voiceMode === "idle" && wasListeningRef.current) {
       wasListeningRef.current = false;
-      if (transcript) {
-        onChange(transcript);
+      if (voiceTranscript) {
+        onChange(voiceTranscript);
         setTimeout(() => textareaRef.current?.focus(), 0);
       }
     }
-  }, [voice.state.mode, voice.state.transcript, onChange]);
+  }, [showVoiceControls, voiceMode, voiceTranscript, onChange]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -79,11 +83,11 @@ export function ChatInput({
     }
   };
 
-  const isListening = voice.state.mode === "listening";
+  const isListening = showVoiceControls && voice.state.mode === "listening";
 
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-2 bg-background p-3">
-      {voice.state.error && (
+      {showVoiceControls && voice.state.error && (
         <p className="text-xs text-destructive px-1">{voice.state.error}</p>
       )}
 
@@ -175,10 +179,12 @@ export function ChatInput({
         </div>
 
         <div className="flex flex-shrink-0 items-center gap-1">
-          <VoiceControls
-            voice={voice}
-            lastAssistantMessage={lastAssistantMessage}
-          />
+          {showVoiceControls && (
+            <VoiceControls
+              voice={voice}
+              lastAssistantMessage={lastAssistantMessage}
+            />
+          )}
           {isLoading ? (
             <Button
               type="button"

@@ -69,7 +69,7 @@ function VoiceControlsInner({ voice, lastAssistantMessage }: VoiceControlsProps)
         </TooltipContent>
       </Tooltip>}
 
-      {/* TTS toggle */}
+      {/* One sound control: it mutes current/automatic speech or resumes it. */}
       {state.ttsSupported && (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -77,41 +77,33 @@ function VoiceControlsInner({ voice, lastAssistantMessage }: VoiceControlsProps)
               type="button"
               variant="ghost"
               size="icon"
-              onClick={isSpeaking ? cancelSpeech : () => lastAssistantMessage && speak(lastAssistantMessage)}
-              disabled={!isSpeaking && !lastAssistantMessage}
-              aria-label={isSpeaking ? "Stop reading" : "Read response aloud"}
+              onClick={() => {
+                if (state.soundEnabled) {
+                  cancelSpeech();
+                  toggleSound();
+                  return;
+                }
+
+                if (lastAssistantMessage?.trim()) {
+                  speak(lastAssistantMessage);
+                  return;
+                }
+
+                toggleSound();
+              }}
+              aria-label={state.soundEnabled ? "Mute AI voice" : "Unmute AI voice"}
               className={cn(
                 "transition-colors",
                 isSpeaking &&
                   "bg-blue-100 text-blue-600 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-400"
               )}
             >
-              {isSpeaking ? (
-                <VolumeX className="h-5 w-5" />
-              ) : (
-                <Volume2 className="h-5 w-5" />
-              )}
+              {state.soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
             </Button>
           </TooltipTrigger>
           <TooltipContent>
-            {isSpeaking ? "Stop reading" : "Read response aloud"}
+            {state.soundEnabled ? "Mute AI voice" : "Unmute and read response"}
           </TooltipContent>
-        </Tooltip>
-      )}
-      {state.ttsSupported && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={toggleSound}
-              aria-label={state.soundEnabled ? "Mute automatic read aloud" : "Unmute automatic read aloud"}
-            >
-              {state.soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{state.soundEnabled ? "Mute automatic read aloud" : "Unmute automatic read aloud"}</TooltipContent>
         </Tooltip>
       )}
       {state.ttsSupported && (

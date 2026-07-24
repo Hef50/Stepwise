@@ -36,6 +36,36 @@ function hasTts() {
   return isBrowser && "speechSynthesis" in window;
 }
 
+/**
+ * SpeechSynthesis cannot change an utterance's rate after it begins. Splitting
+ * a reply at natural pauses lets the selected rate take effect on the next
+ * phrase without cancelling, repeating, or clipping the current words.
+ */
+function splitSpeechIntoPhrases(text: string): string[] {
+  const cleaned = stripMarkdownForSpeech(text).trim();
+  if (!cleaned) return [];
+
+  const phrases = cleaned.match(/[^.!?;:,]+[.!?;:,]+|[^.!?;:,]+$/g) ?? [cleaned];
+  return phrases.flatMap((phrase) => {
+    const trimmed = phrase.trim();
+    if (trimmed.length <= 180) return trimmed ? [trimmed] : [];
+
+    const words = trimmed.split(/\s+/);
+    const chunks: string[] = [];
+    let chunk = "";
+    for (const word of words) {
+      if (chunk && chunk.length + word.length + 1 > 180) {
+        chunks.push(chunk);
+        chunk = word;
+      } else {
+        chunk = chunk ? `${chunk} ${word}` : word;
+      }
+    }
+    if (chunk) chunks.push(chunk);
+    return chunks;
+  });
+}
+
 function initialState(): VoiceState {
   return {
     mode: "idle",
@@ -59,6 +89,8 @@ export function useVoiceTA(onTranscriptReady?: (text: string) => void): VoiceCon
   const speedRef = useRef(1);
   const queueRef = useRef<string[]>([]);
   const speakingRef = useRef(false);
+  // Invalidates callbacks from an utterance that was explicitly cancelled.
+  const utteranceGenerationRef = useRef(0);
   const transcriptCallbackRef = useRef(onTranscriptReady);
 
   useEffect(() => {
@@ -82,6 +114,7 @@ export function useVoiceTA(onTranscriptReady?: (text: string) => void): VoiceCon
   }, []);
 
   const cancelSpeech = useCallback(() => {
+    utteranceGenerationRef.current += 1;
     queueRef.current = [];
     speakingRef.current = false;
     if (hasTts()) window.speechSynthesis.cancel();
@@ -95,18 +128,24 @@ export function useVoiceTA(onTranscriptReady?: (text: string) => void): VoiceCon
     const next = queueRef.current.shift();
     if (!next) return;
 
+    const speechText = stripMarkdownForSpeech(next);
     speakingRef.current = true;
-    const utterance = new SpeechSynthesisUtterance(stripMarkdownForSpeech(next));
+    const utteranceGeneration = ++utteranceGenerationRef.current;
+    const utterance = new SpeechSynthesisUtterance(speechText);
     utterance.lang = "en-US";
     utterance.rate = speedRef.current;
-    utterance.onstart = () =>
+    utterance.onstart = () => {
+      if (utteranceGeneration !== utteranceGenerationRef.current) return;
       setState((previous) => ({ ...previous, mode: "speaking", error: null, ttsStatus: "Speaking" }));
+    };
     utterance.onend = () => {
+      if (utteranceGeneration !== utteranceGenerationRef.current) return;
       speakingRef.current = false;
       setState((previous) => ({ ...previous, mode: "idle", ttsStatus: null }));
       speakNext();
     };
     utterance.onerror = (event) => {
+      if (utteranceGeneration !== utteranceGenerationRef.current) return;
       speakingRef.current = false;
       if (event.error === "interrupted" || event.error === "canceled") {
         setState((previous) => ({ ...previous, mode: "idle", ttsStatus: null }));
@@ -120,7 +159,7 @@ export function useVoiceTA(onTranscriptReady?: (text: string) => void): VoiceCon
   const enqueueSpeech = useCallback(
     (text: string) => {
       if (!text.trim() || !soundEnabledRef.current) return;
-      queueRef.current.push(text);
+      queueRef.current.push(...splitSpeechIntoPhrases(text));
       speakNext();
     },
     [speakNext]
@@ -138,7 +177,7 @@ export function useVoiceTA(onTranscriptReady?: (text: string) => void): VoiceCon
         setState((previous) => ({ ...previous, soundEnabled: true }));
       }
       cancelSpeech();
-      queueRef.current = [text];
+      queueRef.current = splitSpeechIntoPhrases(text);
       speakNext();
     },
     [cancelSpeech, speakNext]
@@ -205,6 +244,7 @@ export function useVoiceTA(onTranscriptReady?: (text: string) => void): VoiceCon
 
   useEffect(() => () => {
     recognitionRef.current?.abort();
+    utteranceGenerationRef.current += 1;
     if (hasTts()) window.speechSynthesis.cancel();
   }, []);
 

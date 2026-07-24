@@ -188,6 +188,7 @@ export function ChatPanel({
   const [manuallyDowngraded, setManuallyDowngraded] = useState(false);
   const [materialsOpen, setMaterialsOpen] = useState(false);
   const [isCatchingUpReveal, setIsCatchingUpReveal] = useState(false);
+  const [isPreparingWhiteboard, setIsPreparingWhiteboard] = useState(false);
   const submitMixedRef = useRef<(text: string) => void>(() => {});
   const voice = useVoiceTA((transcript) => {
     if (interactionMode !== "mixed") return;
@@ -385,6 +386,14 @@ export function ChatPanel({
     enqueueDiagramDrawRef.current = enqueueDiagramDraw;
     processDrawQueueRef.current = processDrawQueue;
   }, [enqueueLatexDraw, enqueueTextDraw, enqueueDiagramDraw, processDrawQueue]);
+
+  // Tool calls can arrive before the dynamically loaded tldraw editor mounts.
+  // Keep those queued shapes and render them as soon as the editor is available.
+  useEffect(() => {
+    if (editorReady && drawQueueRef.current.length > 0) {
+      void processDrawQueue();
+    }
+  }, [editorReady, processDrawQueue]);
 
   const provider: ChatProvider = escalated ? "gemma" : "llm7";
 
@@ -619,15 +628,26 @@ export function ChatPanel({
   const submitText = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || isLoading) return;
+      if (!trimmed || isLoading || isPreparingWhiteboard) return;
 
       const imageFiles = files.filter((f) => f.type.startsWith("image/"));
+      const forceWhiteboard = detectWhiteboardIntent(trimmed);
 
-      // Determine if this message escalates to Gemma
-      const needsVision = imageFiles.length > 0;
-      const effectiveProvider: ChatProvider = needsVision || escalated ? "gemma" : "llm7";
+      // Text and Mixed mode share the current board automatically when it has
+      // content. This keeps a written problem and the user's typed question in
+      // the same vision request instead of requiring a separate camera action.
+      setIsPreparingWhiteboard(true);
+      const whiteboardPayload = await captureWhiteboard().catch(() => null);
+      setIsPreparingWhiteboard(false);
+      const whiteboardImage = whiteboardPayload?.imageDataUrl;
 
-      if (needsVision) {
+      // Vision and explicit draw requests require Gemma's actual tool calls.
+      // LLM7 remains the inexpensive text-only path when neither is needed.
+      const needsVision = imageFiles.length > 0 || Boolean(whiteboardImage);
+      const effectiveProvider: ChatProvider =
+        needsVision || forceWhiteboard || escalated ? "gemma" : "llm7";
+
+      if (needsVision || forceWhiteboard) {
         setEscalated(true);
         setManuallyDowngraded(false);
       }
@@ -643,6 +663,9 @@ export function ChatPanel({
       for (const img of imageFiles) {
         parts.push({ type: "file", mediaType: img.type, url: img.dataUrl });
       }
+      if (whiteboardImage) {
+        parts.push({ type: "file", mediaType: "image/png", url: whiteboardImage });
+      }
 
       // Snapshot enabled course materials into message metadata (server injects for LLM)
       const pdfAttachments: MessagePdfAttachment[] =
@@ -652,8 +675,6 @@ export function ChatPanel({
 
       const metadata: StepwiseMessageMetadata | undefined =
         pdfAttachments.length > 0 ? { attachments: pdfAttachments } : undefined;
-
-      const forceWhiteboard = detectWhiteboardIntent(trimmed);
 
       sendMessage(
         { parts, metadata },
@@ -671,7 +692,9 @@ export function ChatPanel({
     [
       files,
       isLoading,
+      isPreparingWhiteboard,
       escalated,
+      captureWhiteboard,
       sendMessage,
       courseMaterials.enabledMaterials,
       devMode,
@@ -983,7 +1006,7 @@ export function ChatPanel({
           onChange={setInput}
           onSubmit={handleSubmit}
           onStop={handleStopGeneration}
-          isLoading={isLoading || revealPaused || isCatchingUpReveal}
+          isLoading={isLoading || isPreparingWhiteboard || revealPaused || isCatchingUpReveal}
           voice={voice}
           files={files}
           onFilesChange={setFiles}
@@ -993,6 +1016,7 @@ export function ChatPanel({
             courseMaterials.materials.filter((m) => m.enabled).length
           }
           lastAssistantMessage={lastAssistantText}
+          showVoiceControls={interactionMode === "mixed"}
         />
       </div>
     </TooltipProvider>

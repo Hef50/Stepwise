@@ -88,8 +88,13 @@ export function useGeminiLive({
   const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /** Scheduled end time for the last queued audio buffer (Web Audio API clock) */
   const nextPlayTimeRef = useRef<number>(0);
+  /** AudioBufferSources must be explicitly stopped to make a barge-in immediate. */
+  const activeAudioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   /** True while the model is streaming audio output */
   const isSpeakingRef = useRef<boolean>(false);
+  /** Prevent model captions from getting ahead of the audio they transcribe. */
+  const outputAudioStartedRef = useRef(false);
+  const pendingOutputTranscriptionRef = useRef<Array<{ text: string; partial: boolean }>>([]);
   /** Last turn ended slow — throttle whiteboard frames */
   const slowResponseRef = useRef<boolean>(false);
   const renderLatexRef = useRef(renderLatexOnCanvas);
@@ -122,13 +127,33 @@ export function useGeminiLive({
     []
   );
 
+  const flushPendingOutputTranscription = useCallback((force = false) => {
+    if (!force && !outputAudioStartedRef.current) return;
+    const pending = pendingOutputTranscriptionRef.current;
+    pendingOutputTranscriptionRef.current = [];
+    for (const entry of pending) {
+      upsertTranscriptLine("model", entry.text, entry.partial);
+    }
+  }, [upsertTranscriptLine]);
+
   // ── Audio output playback ─────────────────────────────────────────────────
 
   const stopPlayback = useCallback(() => {
     const ctx = audioCtxRef.current;
     if (!ctx) return;
+    for (const source of activeAudioSourcesRef.current) {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // A source that already ended cannot be stopped again.
+      }
+    }
+    activeAudioSourcesRef.current.clear();
     nextPlayTimeRef.current = ctx.currentTime;
     isSpeakingRef.current = false;
+    outputAudioStartedRef.current = false;
+    pendingOutputTranscriptionRef.current = [];
     setStatus("active");
   }, []);
 
@@ -149,10 +174,16 @@ export function useGeminiLive({
     const source = ctx.createBufferSource();
     source.buffer = audioBuf;
     source.connect(ctx.destination);
+    activeAudioSourcesRef.current.add(source);
 
     const startAt = Math.max(ctx.currentTime, nextPlayTimeRef.current);
     source.start(startAt);
     nextPlayTimeRef.current = startAt + audioBuf.duration;
+
+    if (!outputAudioStartedRef.current) {
+      outputAudioStartedRef.current = true;
+      flushPendingOutputTranscription();
+    }
 
     if (!isSpeakingRef.current) {
       isSpeakingRef.current = true;
@@ -160,12 +191,17 @@ export function useGeminiLive({
     }
 
     source.onended = () => {
-      if (nextPlayTimeRef.current <= ctx.currentTime + 0.05) {
+      activeAudioSourcesRef.current.delete(source);
+      if (
+        activeAudioSourcesRef.current.size === 0 &&
+        nextPlayTimeRef.current <= ctx.currentTime + 0.05
+      ) {
         isSpeakingRef.current = false;
+        outputAudioStartedRef.current = false;
         setStatus("active");
       }
     };
-  }, []);
+  }, [flushPendingOutputTranscription]);
 
   // ── Message handler ───────────────────────────────────────────────────────
 
@@ -191,17 +227,26 @@ export function useGeminiLive({
 
       // Output transcription (model speech)
       if (sc?.outputTranscription?.text) {
-        upsertTranscriptLine(
-          "model",
-          sc.outputTranscription.text,
-          !(sc.outputTranscription.finished ?? false)
-        );
+        const entry = {
+          text: sc.outputTranscription.text,
+          partial: !(sc.outputTranscription.finished ?? false),
+        };
+        if (outputAudioStartedRef.current) {
+          upsertTranscriptLine("model", entry.text, entry.partial);
+        } else {
+          pendingOutputTranscriptionRef.current.push(entry);
+        }
       }
 
       // Turn complete — model finished responding
       if (sc?.turnComplete) {
-        isSpeakingRef.current = false;
-        setStatus("active");
+        // A turn can complete while its already-received audio is still queued
+        // in Web Audio. Keep the speaking state until playback actually ends.
+        flushPendingOutputTranscription(true);
+        if (!isSpeakingRef.current) {
+          outputAudioStartedRef.current = false;
+          setStatus("active");
+        }
       }
 
       // Model was interrupted (barge-in)
@@ -210,7 +255,7 @@ export function useGeminiLive({
         slowResponseRef.current = false;
       }
     },
-    [playAudioChunk, upsertTranscriptLine, stopPlayback]
+    [flushPendingOutputTranscription, playAudioChunk, upsertTranscriptLine, stopPlayback]
   );
 
   // ── Mic capture setup ─────────────────────────────────────────────────────
@@ -362,6 +407,14 @@ export function useGeminiLive({
     if (workletNodeRef.current) workletNodeRef.current.port.onmessage = null;
     stopMic();
     if (audioCtxRef.current) {
+      for (const source of activeAudioSourcesRef.current) {
+        try {
+          source.stop();
+        } catch {
+          // ignore already-finished sources
+        }
+      }
+      activeAudioSourcesRef.current.clear();
       void audioCtxRef.current.close();
       audioCtxRef.current = null;
     }
@@ -370,6 +423,8 @@ export function useGeminiLive({
       sessionRef.current = null;
     }
     isSpeakingRef.current = false;
+    outputAudioStartedRef.current = false;
+    pendingOutputTranscriptionRef.current = [];
     nextPlayTimeRef.current = 0;
     slowResponseRef.current = false;
   }, [stopMic]);
@@ -380,6 +435,8 @@ export function useGeminiLive({
     if (status !== "idle" && status !== "error") return;
     setError(null);
     setTranscript([]);
+    outputAudioStartedRef.current = false;
+    pendingOutputTranscriptionRef.current = [];
     setMuted(false);
     setStatus("connecting");
 
