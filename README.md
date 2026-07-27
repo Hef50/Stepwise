@@ -34,7 +34,7 @@ A responsive AI tutoring web app with a streaming chat interface, interactive tl
 - **Voice interface (text mode)** — Web Speech API for local STT + TTS
 - **LocalStorage persistence** — text-mode chat history survives refresh
 
-## Quick Start
+## Quick Start 
 
 ```bash
 npm install
